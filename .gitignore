@@ -1,0 +1,9 @@
+@"
+node_modules
+.env
+dist
+build
+coverage
+*.log
+Docker/data
+"@ | Out-File -Encoding utf8 .gitignore

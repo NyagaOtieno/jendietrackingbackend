@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:16
+    container_name: tracking_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tracking_platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - tracking_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tracking_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tracking_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      PORT: 4000
+      NODE_ENV: development
+      FRONTEND_ORIGIN: http://localhost:8080
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/tracking_platform
+      JWT_SECRET: change_this_secret_key
+      ENABLE_REVERSE_GEOCODE: "false"
+    ports:
+      - "4000:4000"
+
+volumes:
+  tracking_pgdata:
