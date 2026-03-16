@@ -188,3 +188,202 @@ export async function getHistory(req, res) {
     });
   }
 }
+
+export async function createPosition(req, res) {
+  try {
+    const { deviceUid, lat, lon, speedKph = 0, heading = 0, deviceTime = null } = req.body;
+
+    if (!deviceUid || lat == null || lon == null) {
+      return res.status(400).json({
+        success: false,
+        message: "deviceUid, lat and lon are required",
+      });
+    }
+
+    const result = await query(
+      `
+      INSERT INTO telemetry (
+        device_id,
+        latitude,
+        longitude,
+        speed_kph,
+        heading,
+        device_time
+      )
+      SELECT
+        d.id,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6
+      FROM devices d
+      WHERE d.device_uid = $1
+      RETURNING
+        id::text AS id,
+        latitude AS lat,
+        longitude AS lon,
+        speed_kph AS "speedKph",
+        heading,
+        device_time AS "deviceTime",
+        received_at AS "receivedAt"
+      `,
+      [deviceUid, lat, lon, speedKph, heading, deviceTime]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Device not found",
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        deviceUid,
+        ...result.rows[0],
+      },
+    });
+  } catch (error) {
+    console.error("createPosition error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create position",
+    });
+  }
+}
+
+export async function getPositionById(req, res) {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      `
+      SELECT
+        t.id::text AS id,
+        d.device_uid AS "deviceUid",
+        t.latitude AS lat,
+        t.longitude AS lon,
+        t.speed_kph AS "speedKph",
+        t.heading,
+        t.device_time AS "deviceTime",
+        t.received_at AS "receivedAt"
+      FROM telemetry t
+      INNER JOIN devices d ON d.id = t.device_id
+      WHERE t.id = $1
+      `,
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Position not found",
+      });
+    }
+
+    const row = result.rows[0];
+
+    return res.json({
+      success: true,
+      data: {
+        ...row,
+        locationName: await safeLocationName(row.lat, row.lon),
+      },
+    });
+  } catch (error) {
+    console.error("getPositionById error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load position",
+    });
+  }
+}
+
+export async function updatePosition(req, res) {
+  try {
+    const { id } = req.params;
+    const { lat, lon, speedKph, heading, deviceTime } = req.body;
+
+    const existing = await query(`SELECT * FROM telemetry WHERE id = $1`, [id]);
+
+    if (!existing.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Position not found",
+      });
+    }
+
+    const current = existing.rows[0];
+
+    const result = await query(
+      `
+      UPDATE telemetry
+      SET
+        latitude = $1,
+        longitude = $2,
+        speed_kph = $3,
+        heading = $4,
+        device_time = $5
+      WHERE id = $6
+      RETURNING
+        id::text AS id,
+        latitude AS lat,
+        longitude AS lon,
+        speed_kph AS "speedKph",
+        heading,
+        device_time AS "deviceTime",
+        received_at AS "receivedAt"
+      `,
+      [
+        lat ?? current.latitude,
+        lon ?? current.longitude,
+        speedKph ?? current.speed_kph,
+        heading ?? current.heading,
+        deviceTime ?? current.device_time,
+        id,
+      ]
+    );
+
+    return res.json({
+      success: true,
+      data: result.rows[0],
+    });
+  } catch (error) {
+    console.error("updatePosition error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update position",
+    });
+  }
+}
+
+export async function deletePosition(req, res) {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      `DELETE FROM telemetry WHERE id = $1 RETURNING id`,
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Position not found",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Position deleted",
+    });
+  } catch (error) {
+    console.error("deletePosition error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete position",
+    });
+  }
+}

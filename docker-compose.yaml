@@ -30,7 +30,7 @@ services:
       - .env
     environment:
       PORT: 4000
-      NODE_ENV: development
+      NODE_ENV: production
       FRONTEND_ORIGIN: http://localhost:8080
       DATABASE_URL: postgresql://postgres:postgres@db:5432/tracking_platform
       JWT_SECRET: change_this_secret_key

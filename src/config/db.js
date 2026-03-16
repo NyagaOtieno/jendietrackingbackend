@@ -6,13 +6,11 @@ dotenv.config();
 const { Pool } = pkg;
 
 const connectionString = process.env.DATABASE_URL;
+const useSsl = process.env.DB_SSL === "true";
 
 export const pool = new Pool({
   connectionString,
-  ssl:
-    process.env.NODE_ENV === "production"
-      ? { rejectUnauthorized: false }
-      : false,
+  ssl: useSsl ? { rejectUnauthorized: false } : false,
 });
 
 export async function query(text, params = []) {

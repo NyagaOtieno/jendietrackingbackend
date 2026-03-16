@@ -1,69 +1,100 @@
-import { query } from "../config/db.js";
-
-const mockDevices = [
-  {
-    deviceUid: "VEH001",
-    label: "Tracker 001",
-    vehicleReg: "KDA 190Z",
-    clientId: "CLIENT001",
-    companyId: null,
-    saccoId: "SACCO001",
-    expiresAt: null,
-    isExpired: false,
-    alertCount: 1,
-  },
-  {
-    deviceUid: "VEH002",
-    label: "Tracker 002",
-    vehicleReg: "KBT 742X",
-    clientId: "CLIENT002",
-    companyId: "COMP001",
-    saccoId: null,
-    expiresAt: null,
-    isExpired: false,
-    alertCount: 0,
-  },
-];
-
-export async function getFleetDevices(_req, res) {
+export async function getFleets(_req, res) {
   try {
-    let devices = [];
-
-    try {
-      const result = await query(`
-        SELECT
-          d.device_uid AS "deviceUid",
-          COALESCE(d.label, d.device_uid) AS label,
-          COALESCE(v.plate_number, '') AS "vehicleReg",
-          a.client_code AS "clientId",
-          a.company_code AS "companyId",
-          a.sacco_code AS "saccoId",
-          d.expires_at AS "expiresAt",
-          CASE
-            WHEN d.expires_at IS NOT NULL AND d.expires_at < NOW() THEN true
-            ELSE false
-          END AS "isExpired",
-          0::int AS "alertCount"
-        FROM devices d
-        LEFT JOIN vehicles v ON v.id = d.vehicle_id
-        LEFT JOIN accounts a ON a.id = v.account_id
-        ORDER BY d.created_at DESC
-      `);
-
-      devices = result.rows;
-    } catch {
-      devices = mockDevices;
-    }
+    const result = await query(`
+      SELECT id, name, created_at
+      FROM fleets
+      ORDER BY created_at DESC
+    `);
 
     return res.json({
       success: true,
-      data: devices,
+      data: result.rows,
     });
   } catch (error) {
-    console.error("getFleetDevices error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to load fleet devices",
+    console.error("getFleets error:", error);
+    res.status(500).json({ success: false, message: "Failed to load fleets" });
+  }
+}
+
+export async function getFleetById(req, res) {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      `SELECT * FROM fleets WHERE id = $1`,
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Fleet not found",
+      });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error("getFleetById error:", error);
+    res.status(500).json({ success: false, message: "Failed to load fleet" });
+  }
+}
+
+export async function createFleet(req, res) {
+  try {
+    const { name } = req.body;
+
+    const result = await query(
+      `INSERT INTO fleets (name)
+       VALUES ($1)
+       RETURNING *`,
+      [name]
+    );
+
+    res.json({
+      success: true,
+      data: result.rows[0],
     });
+  } catch (error) {
+    console.error("createFleet error:", error);
+    res.status(500).json({ success: false, message: "Failed to create fleet" });
+  }
+}
+
+export async function updateFleet(req, res) {
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
+
+    const result = await query(
+      `UPDATE fleets
+       SET name = $1
+       WHERE id = $2
+       RETURNING *`,
+      [name, id]
+    );
+
+    res.json({
+      success: true,
+      data: result.rows[0],
+    });
+  } catch (error) {
+    console.error("updateFleet error:", error);
+    res.status(500).json({ success: false, message: "Failed to update fleet" });
+  }
+}
+
+export async function deleteFleet(req, res) {
+  try {
+    const { id } = req.params;
+
+    await query(`DELETE FROM fleets WHERE id = $1`, [id]);
+
+    res.json({
+      success: true,
+      message: "Fleet deleted",
+    });
+  } catch (error) {
+    console.error("deleteFleet error:", error);
+    res.status(500).json({ success: false, message: "Failed to delete fleet" });
   }
 }
