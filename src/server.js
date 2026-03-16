@@ -7,6 +7,8 @@ import positionsRoutes from "./routes/positions.routes.js";
 import fleetRoutes from "./routes/fleet.routes.js";
 import authRoutes from "./routes/auth.routes.js";
 import seedRoutes from "./routes/seed.routes.js";
+import accountsRoutes from "./routes/accounts.routes.js";
+import devicesRoutes from "./routes/devices.routes.js";
 
 dotenv.config();
 
@@ -40,6 +42,8 @@ app.get("/health", async (_req, res) => {
 
 app.use("/v1/auth", authRoutes);
 app.use("/v1/seed", seedRoutes);
+app.use("/v1/accounts", accountsRoutes);
+app.use("/v1/devices", devicesRoutes);
 app.use("/v1/positions", positionsRoutes);
 app.use("/v1/fleet", fleetRoutes);
 

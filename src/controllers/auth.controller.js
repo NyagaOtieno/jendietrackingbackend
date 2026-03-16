@@ -9,6 +9,7 @@ function signUser(user) {
       email: user.email,
       role: user.role,
       fullName: user.full_name,
+      status: user.status,
     },
     process.env.JWT_SECRET,
     { expiresIn: "7d" }
@@ -26,7 +27,11 @@ export async function register(req, res) {
       });
     }
 
-    const existing = await query(`SELECT id FROM users WHERE email = $1`, [email]);
+    const existing = await query(
+      `SELECT id FROM users WHERE email = $1 LIMIT 1`,
+      [email]
+    );
+
     if (existing.rows.length > 0) {
       return res.status(409).json({
         success: false,
@@ -45,9 +50,24 @@ export async function register(req, res) {
       [fullName, email, phone || null, passwordHash, role]
     );
 
+    const user = result.rows[0];
+    const token = signUser(user);
+
     return res.status(201).json({
       success: true,
-      data: result.rows[0],
+      message: "User registered successfully",
+      data: {
+        token,
+        user: {
+          id: user.id,
+          fullName: user.full_name,
+          email: user.email,
+          phone: user.phone,
+          role: user.role,
+          status: user.status,
+          createdAt: user.created_at,
+        },
+      },
     });
   } catch (error) {
     console.error("register error:", error);
@@ -75,6 +95,7 @@ export async function login(req, res) {
     );
 
     const user = result.rows[0];
+
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -83,6 +104,7 @@ export async function login(req, res) {
     }
 
     const valid = await bcrypt.compare(password, user.password_hash);
+
     if (!valid) {
       return res.status(401).json({
         success: false,
@@ -101,13 +123,17 @@ export async function login(req, res) {
 
     return res.json({
       success: true,
+      message: "Login successful",
       data: {
         token,
         user: {
           id: user.id,
           fullName: user.full_name,
           email: user.email,
+          phone: user.phone,
           role: user.role,
+          status: user.status,
+          createdAt: user.created_at,
         },
       },
     });
@@ -116,6 +142,48 @@ export async function login(req, res) {
     return res.status(500).json({
       success: false,
       message: "Failed to login",
+    });
+  }
+}
+
+export async function getMe(req, res) {
+  try {
+    const result = await query(
+      `
+      SELECT id, full_name, email, phone, role, status, created_at
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [req.user.id]
+    );
+
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: user.id,
+        fullName: user.full_name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        status: user.status,
+        createdAt: user.created_at,
+      },
+    });
+  } catch (error) {
+    console.error("getMe error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load profile",
     });
   }
 }

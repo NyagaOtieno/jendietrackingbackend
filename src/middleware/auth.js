@@ -1,37 +1,54 @@
 import jwt from "jsonwebtoken";
 
-export function authRequired(req, res, next) {
-  const header = req.headers.authorization;
+function getTokenFromHeader(req) {
+  const authHeader = req.headers.authorization || "";
 
-  if (!header || !header.startsWith("Bearer ")) {
-    return res.status(401).json({
-      success: false,
-      message: "Authorization token required",
-    });
+  if (!authHeader.startsWith("Bearer ")) {
+    return null;
   }
 
-  const token = header.split(" ")[1];
+  return authHeader.slice(7).trim();
+}
 
+export function requireAuth(req, res, next) {
   try {
+    const token = getTokenFromHeader(req);
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: "Authorization token is required",
+      });
+    }
+
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
     req.user = decoded;
-    next();
-  } catch {
+    return next();
+  } catch (error) {
     return res.status(401).json({
       success: false,
-      message: "Invalid token",
+      message: "Invalid or expired token",
     });
   }
 }
 
-export function allowRoles(...roles) {
+export function requireRole(...roles) {
   return (req, res, next) => {
-    if (!req.user || !roles.includes(req.user.role)) {
-      return res.status(403).json({
+    if (!req.user) {
+      return res.status(401).json({
         success: false,
-        message: "Access denied",
+        message: "Unauthorized",
       });
     }
-    next();
+
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: insufficient permissions",
+      });
+    }
+
+    return next();
   };
 }
