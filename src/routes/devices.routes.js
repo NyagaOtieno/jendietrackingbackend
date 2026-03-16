@@ -1,3 +1,4 @@
+cat > src/routes/devices.routes.js <<'EOF'
 import express from "express";
 import {
   getDevices,

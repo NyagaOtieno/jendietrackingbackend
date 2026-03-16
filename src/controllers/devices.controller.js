@@ -1,3 +1,4 @@
+
 import { query } from "../config/db.js";
 
 export async function getDevices(_req, res) {

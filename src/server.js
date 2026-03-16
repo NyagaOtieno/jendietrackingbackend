@@ -1,3 +1,4 @@
+
 import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
@@ -7,8 +8,8 @@ import positionsRoutes from "./routes/positions.routes.js";
 import fleetRoutes from "./routes/fleet.routes.js";
 import authRoutes from "./routes/auth.routes.js";
 import seedRoutes from "./routes/seed.routes.js";
-import accountsRoutes from "./routes/accounts.routes.js";
 import devicesRoutes from "./routes/devices.routes.js";
+import accountsRoutes from "./routes/accounts.routes.js";
 
 dotenv.config();
 
