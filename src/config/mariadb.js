@@ -1,16 +1,14 @@
-import mysql from "mysql2/promise";
-import dotenv from "dotenv";
+import mariadb from "mysql2/promise";
 
-dotenv.config();
-
-export const mariaPool = mysql.createPool({
-  host: process.env.MARIA_HOST,
-  port: Number(process.env.MARIA_PORT || 3306),
-  user: process.env.MARIA_USER,
-  password: process.env.MARIA_PASSWORD,
-  database: process.env.MARIA_DATABASE,
+const mariadbPool = mariadb.createPool({
+  host: process.env.MARIA_DB_HOST,
+  port: Number(process.env.MARIA_DB_PORT || 3306),
+  user: process.env.MARIA_DB_USER,
+  password: process.env.MARIA_DB_PASSWORD,
+  database: process.env.MARIA_DB_NAME,
   waitForConnections: true,
-  connectionLimit: 5,
+  connectionLimit: 10,
   queueLimit: 0,
-  connectTimeout: 10000,
 });
+
+export default mariadbPool;
