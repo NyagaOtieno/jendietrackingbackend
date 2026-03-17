@@ -11,7 +11,6 @@ import seedRoutes from "./routes/seed.routes.js";
 import devicesRoutes from "./routes/devices.routes.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import vehiclesRoutes from "./routes/vehicles.routes.js";
-import mariaTrackingRoutes from "./routes/mariaTracking.routes.js";
 import syncRoutes from "./routes/sync.routes.js";
 import { startMariaSyncJob } from "./jobs/mariaSync.job.js";
 
@@ -52,7 +51,6 @@ app.use("/api/devices", devicesRoutes);
 app.use("/api/positions", positionsRoutes);
 app.use("/api/fleet", fleetRoutes);
 app.use("/api/vehicles", vehiclesRoutes);
-app.use("/api/maria-tracking", mariaTrackingRoutes);
 app.use("/api/sync", syncRoutes);
 
 
