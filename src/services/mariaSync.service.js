@@ -1,4 +1,4 @@
-import pool from "../config/db.js";
+import { pool } from "../config/db.js";
 import { fetchMariaTrackingData } from "./mariaTracking.service.js";
 
 export async function runMariaSync() {
