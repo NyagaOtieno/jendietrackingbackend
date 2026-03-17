@@ -66,5 +66,5 @@ startMariaSyncJob();
 const PORT = process.env.PORT || 4000;
 
 app.listen(PORT, () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
+  console.log(`Backend running on http://34.228.44.137:${PORT}`);
 });
