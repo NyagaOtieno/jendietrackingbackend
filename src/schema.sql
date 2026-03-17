@@ -66,6 +66,28 @@ CREATE TABLE IF NOT EXISTS latest_positions (
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS sync_logs (
+  id BIGSERIAL PRIMARY KEY,
+  job_name VARCHAR(100) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  records_processed INTEGER NOT NULL DEFAULT 0,
+  message TEXT,
+  started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  finished_at TIMESTAMP NULL
+);
+
+CREATE TABLE IF NOT EXISTS external_device_links (
+  id BIGSERIAL PRIMARY KEY,
+  registration VARCHAR(50),
+  source_serial_number VARCHAR(100),
+  lookup_serial_number VARCHAR(100),
+  source_device_id VARCHAR(100),
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  UNIQUE(registration)
+);
+
+
 CREATE INDEX IF NOT EXISTS idx_telemetry_device_received_at
 ON telemetry(device_id, received_at DESC);
 

@@ -11,6 +11,9 @@ import seedRoutes from "./routes/seed.routes.js";
 import devicesRoutes from "./routes/devices.routes.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import vehiclesRoutes from "./routes/vehicles.routes.js";
+import mariaTrackingRoutes from "./routes/mariaTracking.routes.js";
+import syncRoutes from "./routes/sync.routes.js";
+import { startMariaSyncJob } from "./jobs/mariaSync.job.js";
 
 dotenv.config();
 
@@ -49,6 +52,9 @@ app.use("/api/devices", devicesRoutes);
 app.use("/api/positions", positionsRoutes);
 app.use("/api/fleet", fleetRoutes);
 app.use("/api/vehicles", vehiclesRoutes);
+app.use("/api/maria-tracking", mariaTrackingRoutes);
+app.use("/api/sync", syncRoutes);
+
 
 app.use((req, res) => {
   res.status(404).json({
@@ -66,6 +72,8 @@ app.use((error, _req, res, _next) => {
 });
 
 const PORT = process.env.PORT || 4000;
+
+startMariaSyncJob();
 
 app.listen(PORT, () => {
   console.log(`Backend running on http://34.228.44.137:${PORT}`);
