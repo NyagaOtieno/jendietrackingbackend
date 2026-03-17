@@ -1,5 +1,4 @@
 import cron from "node-cron";
-import { runMariaSync } from "../services/mariaSync.service.js";
 
 let isRunning = false;
 
@@ -20,9 +19,8 @@ export function startMariaSyncJob() {
     isRunning = true;
 
     try {
-      console.log("Maria sync started");
-      const result = await runMariaSync();
-      console.log(`Maria sync completed. Processed: ${result.processed}`);
+      console.log("Maria sync job tick");
+      // temporary placeholder until full sync service is wired
     } catch (error) {
       console.error("Maria sync failed:", error.message);
     } finally {
