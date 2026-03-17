@@ -1,8 +1,8 @@
-import express from "express";
+import { Router } from "express";
 import { triggerMariaSync } from "../controllers/sync.controller.js";
 
-const router = express.Router();
+const router = Router();
 
-router.post("/maria-sync", triggerMariaSync);
+router.post("/run", triggerMariaSync);
 
 export default router;
