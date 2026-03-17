@@ -10,6 +10,7 @@ import authRoutes from "./routes/auth.routes.js";
 import seedRoutes from "./routes/seed.routes.js";
 import devicesRoutes from "./routes/devices.routes.js";
 import accountsRoutes from "./routes/accounts.routes.js";
+import vehiclesRoutes from "./routes/vehicles.routes.js";
 
 dotenv.config();
 
@@ -41,12 +42,13 @@ app.get("/health", async (_req, res) => {
   });
 });
 
-app.use("/v1/auth", authRoutes);
-app.use("/v1/seed", seedRoutes);
-app.use("/v1/accounts", accountsRoutes);
-app.use("/v1/devices", devicesRoutes);
-app.use("/v1/positions", positionsRoutes);
-app.use("/v1/fleet", fleetRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/seed", seedRoutes);
+app.use("/api/accounts", accountsRoutes);
+app.use("/api/devices", devicesRoutes);
+app.use("/api/positions", positionsRoutes);
+app.use("/api/fleet", fleetRoutes);
+app.use("/api/vehicles", vehiclesRoutes);
 
 app.use((req, res) => {
   res.status(404).json({
@@ -66,5 +68,5 @@ app.use((error, _req, res, _next) => {
 const PORT = process.env.PORT || 4000;
 
 app.listen(PORT, () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
+  console.log(`Backend running on http://34.228.44.137:${PORT}`);
 });
