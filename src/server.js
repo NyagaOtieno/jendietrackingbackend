@@ -1,3 +1,4 @@
+
 import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
@@ -7,6 +8,9 @@ import positionsRoutes from "./routes/positions.routes.js";
 import fleetRoutes from "./routes/fleet.routes.js";
 import authRoutes from "./routes/auth.routes.js";
 import seedRoutes from "./routes/seed.routes.js";
+import devicesRoutes from "./routes/devices.routes.js";
+import accountsRoutes from "./routes/accounts.routes.js";
+import vehiclesRoutes from "./routes/vehicles.routes.js";
 import syncRoutes from "./routes/sync.routes.js";
 import { startMariaSyncJob } from "./jobs/mariaSync.job.js";
 
@@ -42,9 +46,13 @@ app.get("/health", async (_req, res) => {
 
 app.use("/api/auth", authRoutes);
 app.use("/api/seed", seedRoutes);
+app.use("/api/accounts", accountsRoutes);
+app.use("/api/devices", devicesRoutes);
 app.use("/api/positions", positionsRoutes);
 app.use("/api/fleet", fleetRoutes);
+app.use("/api/vehicles", vehiclesRoutes);
 app.use("/api/sync", syncRoutes);
+
 
 app.use((req, res) => {
   res.status(404).json({
@@ -61,9 +69,9 @@ app.use((error, _req, res, _next) => {
   });
 });
 
-startMariaSyncJob();
-
 const PORT = process.env.PORT || 4000;
+
+startMariaSyncJob();
 
 app.listen(PORT, () => {
   console.log(`Backend running on http://34.228.44.137:${PORT}`);
