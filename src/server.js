@@ -1,4 +1,3 @@
-
 import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
@@ -12,9 +11,8 @@ import devicesRoutes from "./routes/devices.routes.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import vehiclesRoutes from "./routes/vehicles.routes.js";
 import syncRoutes from "./routes/sync.routes.js";
-import { startMariaSyncJob } from "./jobs/mariaSync.job.js";
 import cron from "node-cron";
-import { runMariaSync } from "../services/mariaSync.service.js";
+import { runMariaSync } from "./services/mariaSync.service.js";
 
 let isRunning = false;
 
@@ -87,7 +85,6 @@ app.use("/api/fleet", fleetRoutes);
 app.use("/api/vehicles", vehiclesRoutes);
 app.use("/api/sync", syncRoutes);
 
-
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -105,7 +102,7 @@ app.use((error, _req, res, _next) => {
 
 const PORT = process.env.PORT || 4000;
 
- startMariaSyncJob();
+startMariaSyncJob();
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Backend running on port ${PORT}`);
