@@ -1,34 +1,23 @@
-import cron from "node-cron";
+import express from "express";
 import { runMariaSync } from "../services/mariaSync.service.js";
 
-let isRunning = false;
+const router = express.Router();
 
-export function startMariaSyncJob() {
-  if (process.env.SYNC_ENABLED !== "true") {
-    console.log("Maria sync job disabled");
-    return;
+// Trigger manual sync
+router.post("/run", async (req, res) => {
+  try {
+    const result = await runMariaSync();
+    res.json({
+      success: true,
+      message: "Sync completed",
+      data: result,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
+});
 
-  const schedule = process.env.SYNC_CRON || "*/2 * * * *";
-
-  cron.schedule(schedule, async () => {
-    if (isRunning) {
-      console.log("Maria sync skipped: previous run still in progress");
-      return;
-    }
-
-    isRunning = true;
-
-    try {
-      console.log("Maria sync started");
-      const result = await runMariaSync();
-      console.log("Maria sync completed", result);
-    } catch (error) {
-      console.error("Maria sync failed:", error.message);
-    } finally {
-      isRunning = false;
-    }
-  });
-
-  console.log(`Maria sync job scheduled: ${schedule}`);
-}
+export default router;

@@ -18,17 +18,16 @@ export function startMariaSyncJob() {
     }
 
     isRunning = true;
-    const startedAt = Date.now();
 
-try {
-  console.log("Maria sync job tick");
-  const result = await runMariaSync();
-  console.log("Maria sync result:", JSON.stringify(result));
-} catch (error) {
-  console.error("Maria sync failed:", error?.message || error);
-} finally {
-  isRunning = false;
-}
+    try {
+      console.log("Maria sync started");
+      const result = await runMariaSync();
+      console.log("Maria sync completed", result);
+    } catch (error) {
+      console.error("Maria sync failed:", error.message);
+    } finally {
+      isRunning = false;
+    }
   });
 
   console.log(`Maria sync job scheduled: ${schedule}`);
