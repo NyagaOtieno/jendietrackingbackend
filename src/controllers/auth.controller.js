@@ -7,47 +7,99 @@ function signUser(user) {
     {
       id: user.id,
       email: user.email,
+      username: user.username,
       role: user.role,
       fullName: user.full_name,
       status: user.status,
+      accountId: user.account_id || null,
     },
     process.env.JWT_SECRET,
     { expiresIn: "7d" }
   );
 }
 
+function mapUser(user) {
+  return {
+    id: user.id,
+    fullName: user.full_name,
+    email: user.email,
+    username: user.username,
+    phone: user.phone,
+    role: user.role,
+    status: user.status,
+    accountId: user.account_id || null,
+    createdAt: user.created_at,
+  };
+}
+
 export async function register(req, res) {
   try {
-    const { fullName, email, phone, password, role = "staff" } = req.body;
+    const {
+      fullName,
+      username,
+      email,
+      phone,
+      password,
+      role = "staff",
+      accountId = null,
+    } = req.body;
 
-    if (!fullName || !email || !password) {
+    if (!fullName || !username || !email || !password) {
       return res.status(400).json({
         success: false,
-        message: "fullName, email and password are required",
+        message: "fullName, username, email and password are required",
       });
     }
 
     const existing = await query(
-      `SELECT id FROM users WHERE email = $1 LIMIT 1`,
-      [email]
+      `
+      SELECT id
+      FROM users
+      WHERE email = $1 OR username = $2
+      LIMIT 1
+      `,
+      [email, username]
     );
 
     if (existing.rows.length > 0) {
       return res.status(409).json({
         success: false,
-        message: "Email already exists",
+        message: "Email or username already exists",
       });
+    }
+
+    if (accountId) {
+      const accountCheck = await query(
+        `SELECT id FROM accounts WHERE id = $1 LIMIT 1`,
+        [accountId]
+      );
+
+      if (!accountCheck.rows.length) {
+        return res.status(404).json({
+          success: false,
+          message: "Account not found",
+        });
+      }
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
 
     const result = await query(
       `
-      INSERT INTO users (full_name, email, phone, password_hash, role, status)
-      VALUES ($1, $2, $3, $4, $5, 'active')
-      RETURNING id, full_name, email, phone, role, status, created_at
+      INSERT INTO users (
+        full_name,
+        username,
+        email,
+        phone,
+        password_hash,
+        role,
+        account_id,
+        status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+      RETURNING id, full_name, username, email, phone, role, account_id, status, created_at
       `,
-      [fullName, email, phone || null, passwordHash, role]
+      [fullName, username, email, phone || null, passwordHash, role, accountId]
     );
 
     const user = result.rows[0];
@@ -58,15 +110,7 @@ export async function register(req, res) {
       message: "User registered successfully",
       data: {
         token,
-        user: {
-          id: user.id,
-          fullName: user.full_name,
-          email: user.email,
-          phone: user.phone,
-          role: user.role,
-          status: user.status,
-          createdAt: user.created_at,
-        },
+        user: mapUser(user),
       },
     });
   } catch (error) {
@@ -80,18 +124,23 @@ export async function register(req, res) {
 
 export async function login(req, res) {
   try {
-    const { email, password } = req.body;
+    const { login, password } = req.body;
 
-    if (!email || !password) {
+    if (!login || !password) {
       return res.status(400).json({
         success: false,
-        message: "email and password are required",
+        message: "login and password are required",
       });
     }
 
     const result = await query(
-      `SELECT * FROM users WHERE email = $1 LIMIT 1`,
-      [email]
+      `
+      SELECT *
+      FROM users
+      WHERE email = $1 OR username = $1
+      LIMIT 1
+      `,
+      [login]
     );
 
     const user = result.rows[0];
@@ -126,15 +175,7 @@ export async function login(req, res) {
       message: "Login successful",
       data: {
         token,
-        user: {
-          id: user.id,
-          fullName: user.full_name,
-          email: user.email,
-          phone: user.phone,
-          role: user.role,
-          status: user.status,
-          createdAt: user.created_at,
-        },
+        user: mapUser(user),
       },
     });
   } catch (error) {
@@ -150,7 +191,16 @@ export async function getMe(req, res) {
   try {
     const result = await query(
       `
-      SELECT id, full_name, email, phone, role, status, created_at
+      SELECT
+        id,
+        full_name,
+        username,
+        email,
+        phone,
+        role,
+        account_id,
+        status,
+        created_at
       FROM users
       WHERE id = $1
       LIMIT 1
@@ -169,15 +219,7 @@ export async function getMe(req, res) {
 
     return res.json({
       success: true,
-      data: {
-        id: user.id,
-        fullName: user.full_name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        status: user.status,
-        createdAt: user.created_at,
-      },
+      data: mapUser(user),
     });
   } catch (error) {
     console.error("getMe error:", error);

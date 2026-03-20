@@ -1,59 +1,7 @@
 import { query } from "../config/db.js";
 import * as geo from "../services/reverseGeocode.js";
 import { normalizeLimit } from "../utils/sql.js";
-
-const mockPositions = [
-  {
-    deviceUid: "VEH001",
-    lat: -1.2921,
-    lon: 36.8219,
-    speedKph: 45,
-    heading: 90,
-    deviceTime: null,
-    receivedAt: new Date().toISOString(),
-  },
-  {
-    deviceUid: "VEH002",
-    lat: -1.2864,
-    lon: 36.8172,
-    speedKph: 12,
-    heading: 180,
-    deviceTime: null,
-    receivedAt: new Date().toISOString(),
-  },
-];
-
-const mockHistory = {
-  VEH001: [
-    {
-      id: "1",
-      deviceUid: "VEH001",
-      lat: -1.295,
-      lon: 36.818,
-      speedKph: 20,
-      heading: 85,
-      receivedAt: new Date(Date.now() - 15 * 60000).toISOString(),
-    },
-    {
-      id: "2",
-      deviceUid: "VEH001",
-      lat: -1.2935,
-      lon: 36.8202,
-      speedKph: 32,
-      heading: 88,
-      receivedAt: new Date(Date.now() - 10 * 60000).toISOString(),
-    },
-    {
-      id: "3",
-      deviceUid: "VEH001",
-      lat: -1.2921,
-      lon: 36.8219,
-      speedKph: 45,
-      heading: 90,
-      receivedAt: new Date().toISOString(),
-    },
-  ],
-};
+import { isPrivilegedRole } from "../middleware/auth.js";
 
 async function safeLocationName(lat, lon) {
   try {
@@ -63,8 +11,13 @@ async function safeLocationName(lat, lon) {
   }
 }
 
-async function loadLatestFromDb() {
-  const result = await query(`
+function isPrivileged(req) {
+  return isPrivilegedRole(req.user.role);
+}
+
+async function loadLatestFromDb(req) {
+  const params = [];
+  let sql = `
     SELECT
       d.device_uid AS "deviceUid",
       lp.latitude AS lat,
@@ -72,19 +25,36 @@ async function loadLatestFromDb() {
       lp.speed_kph AS "speedKph",
       lp.heading,
       lp.device_time AS "deviceTime",
-      lp.received_at AS "receivedAt"
+      lp.received_at AS "receivedAt",
+      v.id AS "vehicleId",
+      v.plate_number AS "plateNumber",
+      v.unit_name AS "unitName",
+      v.account_id AS "accountId"
     FROM latest_positions lp
     INNER JOIN devices d ON d.id = lp.device_id
-    ORDER BY lp.received_at DESC
-  `);
+    INNER JOIN vehicles v ON v.id = d.vehicle_id
+  `;
 
+  if (!isPrivileged(req)) {
+    sql += ` WHERE v.account_id = $1 `;
+    params.push(req.user.accountId || null);
+  }
+
+  sql += ` ORDER BY lp.received_at DESC `;
+
+  const result = await query(sql, params);
   return result.rows;
 }
 
-async function loadHistoryFromDb(deviceUid, limit, from, to) {
+async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
   const clauses = [`d.device_uid = $1`];
   const params = [deviceUid];
   let index = 2;
+
+  if (!isPrivileged(req)) {
+    clauses.push(`v.account_id = $${index++}`);
+    params.push(req.user.accountId || null);
+  }
 
   if (from) {
     clauses.push(`t.received_at >= $${index++}`);
@@ -107,9 +77,14 @@ async function loadHistoryFromDb(deviceUid, limit, from, to) {
       t.speed_kph AS "speedKph",
       t.heading,
       t.device_time AS "deviceTime",
-      t.received_at AS "receivedAt"
+      t.received_at AS "receivedAt",
+      v.id AS "vehicleId",
+      v.plate_number AS "plateNumber",
+      v.unit_name AS "unitName",
+      v.account_id AS "accountId"
     FROM telemetry t
     INNER JOIN devices d ON d.id = t.device_id
+    INNER JOIN vehicles v ON v.id = d.vehicle_id
     WHERE ${clauses.join(" AND ")}
     ORDER BY t.received_at DESC
     LIMIT $${index}
@@ -119,15 +94,9 @@ async function loadHistoryFromDb(deviceUid, limit, from, to) {
   return result.rows;
 }
 
-export async function getLatestPositions(_req, res) {
+export async function getLatestPositions(req, res) {
   try {
-    let rows = [];
-
-    try {
-      rows = await loadLatestFromDb();
-    } catch {
-      rows = mockPositions;
-    }
+    const rows = await loadLatestFromDb(req);
 
     const enriched = await Promise.all(
       rows.map(async (pos) => ({
@@ -161,13 +130,7 @@ export async function getHistory(req, res) {
       });
     }
 
-    let rows = [];
-
-    try {
-      rows = await loadHistoryFromDb(deviceUid, limit, from, to);
-    } catch {
-      rows = (mockHistory[deviceUid] || []).slice(0, limit);
-    }
+    const rows = await loadHistoryFromDb(req, deviceUid, limit, from, to);
 
     const enriched = await Promise.all(
       rows.map(async (pos) => ({
@@ -258,8 +221,8 @@ export async function getPositionById(req, res) {
   try {
     const { id } = req.params;
 
-    const result = await query(
-      `
+    const params = [id];
+    let sql = `
       SELECT
         t.id::text AS id,
         d.device_uid AS "deviceUid",
@@ -268,13 +231,23 @@ export async function getPositionById(req, res) {
         t.speed_kph AS "speedKph",
         t.heading,
         t.device_time AS "deviceTime",
-        t.received_at AS "receivedAt"
+        t.received_at AS "receivedAt",
+        v.id AS "vehicleId",
+        v.plate_number AS "plateNumber",
+        v.unit_name AS "unitName",
+        v.account_id AS "accountId"
       FROM telemetry t
       INNER JOIN devices d ON d.id = t.device_id
+      INNER JOIN vehicles v ON v.id = d.vehicle_id
       WHERE t.id = $1
-      `,
-      [id]
-    );
+    `;
+
+    if (!isPrivileged(req)) {
+      sql += ` AND v.account_id = $2 `;
+      params.push(req.user.accountId || null);
+    }
+
+    const result = await query(sql, params);
 
     if (!result.rows.length) {
       return res.status(404).json({

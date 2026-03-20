@@ -1,4 +1,11 @@
+import bcrypt from "bcryptjs";
 import { query } from "../config/db.js";
+
+function getDefaultRoleForAccountType(accountType) {
+  if (accountType === "sacco") return "sacco_user";
+  if (accountType === "company") return "company_user";
+  return "individual_user";
+}
 
 export async function getAccounts(_req, res) {
   try {
@@ -202,6 +209,137 @@ export async function deleteAccount(req, res) {
     return res.status(500).json({
       success: false,
       message: "Failed to delete account",
+    });
+  }
+}
+
+export async function addUserToAccount(req, res) {
+  try {
+    const { id } = req.params;
+    const {
+      fullName,
+      username,
+      email,
+      phone,
+      password,
+      role,
+      status = "active",
+    } = req.body;
+
+    if (!fullName || !username || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "fullName, username, email and password are required",
+      });
+    }
+
+    const accountResult = await query(
+      `SELECT * FROM accounts WHERE id = $1 LIMIT 1`,
+      [id]
+    );
+
+    if (!accountResult.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Account not found",
+      });
+    }
+
+    const account = accountResult.rows[0];
+
+    const existingUser = await query(
+      `
+      SELECT id
+      FROM users
+      WHERE email = $1 OR username = $2
+      LIMIT 1
+      `,
+      [email, username]
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "Email or username already exists",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const finalRole = role || getDefaultRoleForAccountType(account.account_type);
+
+    const result = await query(
+      `
+      INSERT INTO users (
+        full_name,
+        username,
+        email,
+        phone,
+        password_hash,
+        role,
+        account_id,
+        status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id, full_name, username, email, phone, role, account_id, status, created_at
+      `,
+      [
+        fullName,
+        username,
+        email,
+        phone || null,
+        passwordHash,
+        finalRole,
+        id,
+        status,
+      ]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "User added to account successfully",
+      data: result.rows[0],
+    });
+  } catch (error) {
+    console.error("addUserToAccount error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to add user to account",
+    });
+  }
+}
+
+export async function getAccountUsers(req, res) {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      `
+      SELECT
+        id,
+        full_name,
+        username,
+        email,
+        phone,
+        role,
+        account_id,
+        status,
+        created_at
+      FROM users
+      WHERE account_id = $1
+      ORDER BY created_at DESC
+      `,
+      [id]
+    );
+
+    return res.json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error("getAccountUsers error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load account users",
     });
   }
 }

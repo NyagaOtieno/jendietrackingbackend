@@ -25,7 +25,7 @@ export function requireAuth(req, res, next) {
 
     req.user = decoded;
     return next();
-  } catch (error) {
+  } catch (_error) {
     return res.status(401).json({
       success: false,
       message: "Invalid or expired token",
@@ -51,4 +51,8 @@ export function requireRole(...roles) {
 
     return next();
   };
+}
+
+export function isPrivilegedRole(role) {
+  return ["admin", "office_admin", "staff"].includes(role);
 }

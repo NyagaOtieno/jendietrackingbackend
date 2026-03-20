@@ -1,22 +1,43 @@
-
 import { query } from "../config/db.js";
+import { isPrivilegedRole } from "../middleware/auth.js";
 
-export async function getDevices(_req, res) {
+function isPrivileged(req) {
+  return isPrivilegedRole(req.user.role);
+}
+
+export async function getDevices(req, res) {
   try {
-    const result = await query(`
+    let sql = `
       SELECT
-        id,
-        device_uid,
-        label,
-        imei,
-        sim_number,
-        protocol_type,
-        vehicle_id,
-        expires_at,
-        created_at
-      FROM devices
-      ORDER BY created_at DESC
-    `);
+        d.id,
+        d.device_uid,
+        d.label,
+        d.imei,
+        d.sim_number,
+        d.protocol_type,
+        d.vehicle_id,
+        d.expires_at,
+        d.created_at,
+        v.plate_number,
+        v.unit_name,
+        v.account_id,
+        a.account_name,
+        a.account_type
+      FROM devices d
+      LEFT JOIN vehicles v ON v.id = d.vehicle_id
+      LEFT JOIN accounts a ON a.id = v.account_id
+    `;
+
+    const params = [];
+
+    if (!isPrivileged(req)) {
+      sql += ` WHERE v.account_id = $1 `;
+      params.push(req.user.accountId || null);
+    }
+
+    sql += ` ORDER BY d.created_at DESC `;
+
+    const result = await query(sql, params);
 
     return res.json({
       success: true,
@@ -35,23 +56,36 @@ export async function getDeviceById(req, res) {
   try {
     const { id } = req.params;
 
-    const result = await query(
-      `
+    let sql = `
       SELECT
-        id,
-        device_uid,
-        label,
-        imei,
-        sim_number,
-        protocol_type,
-        vehicle_id,
-        expires_at,
-        created_at
-      FROM devices
-      WHERE id = $1
-      `,
-      [id]
-    );
+        d.id,
+        d.device_uid,
+        d.label,
+        d.imei,
+        d.sim_number,
+        d.protocol_type,
+        d.vehicle_id,
+        d.expires_at,
+        d.created_at,
+        v.plate_number,
+        v.unit_name,
+        v.account_id,
+        a.account_name,
+        a.account_type
+      FROM devices d
+      LEFT JOIN vehicles v ON v.id = d.vehicle_id
+      LEFT JOIN accounts a ON a.id = v.account_id
+      WHERE d.id = $1
+    `;
+
+    const params = [id];
+
+    if (!isPrivileged(req)) {
+      sql += ` AND v.account_id = $2 `;
+      params.push(req.user.accountId || null);
+    }
+
+    const result = await query(sql, params);
 
     if (!result.rows.length) {
       return res.status(404).json({

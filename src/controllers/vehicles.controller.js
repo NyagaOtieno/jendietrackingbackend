@@ -1,8 +1,13 @@
 import { query } from "../config/db.js";
+import { isPrivilegedRole } from "../middleware/auth.js";
 
-export async function getVehicles(_req, res) {
+function canAccessAccountData(req) {
+  return isPrivilegedRole(req.user.role);
+}
+
+export async function getVehicles(req, res) {
   try {
-    const result = await query(`
+    let sql = `
       SELECT
         v.id,
         v.plate_number,
@@ -17,8 +22,18 @@ export async function getVehicles(_req, res) {
         v.created_at
       FROM vehicles v
       LEFT JOIN accounts a ON a.id = v.account_id
-      ORDER BY v.created_at DESC
-    `);
+    `;
+
+    const params = [];
+
+    if (!canAccessAccountData(req)) {
+      sql += ` WHERE v.account_id = $1 `;
+      params.push(req.user.accountId || null);
+    }
+
+    sql += ` ORDER BY v.created_at DESC `;
+
+    const result = await query(sql, params);
 
     return res.json({
       success: true,
@@ -37,8 +52,7 @@ export async function getVehicleById(req, res) {
   try {
     const { id } = req.params;
 
-    const result = await query(
-      `
+    let sql = `
       SELECT
         v.id,
         v.plate_number,
@@ -54,9 +68,16 @@ export async function getVehicleById(req, res) {
       FROM vehicles v
       LEFT JOIN accounts a ON a.id = v.account_id
       WHERE v.id = $1
-      `,
-      [id]
-    );
+    `;
+
+    const params = [id];
+
+    if (!canAccessAccountData(req)) {
+      sql += ` AND v.account_id = $2 `;
+      params.push(req.user.accountId || null);
+    }
+
+    const result = await query(sql, params);
 
     if (!result.rows.length) {
       return res.status(404).json({
