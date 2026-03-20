@@ -40,3 +40,6 @@ services:
 
 volumes:
   tracking_pgdata:
+
+  environment:
+  NODE_OPTIONS: --max-old-space-size=2048
