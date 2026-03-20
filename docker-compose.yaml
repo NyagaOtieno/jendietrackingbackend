@@ -35,11 +35,9 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/tracking_platform
       JWT_SECRET: change_this_secret_key
       ENABLE_REVERSE_GEOCODE: "false"
+      NODE_OPTIONS: --max-old-space-size=2048
     ports:
       - "4000:4000"
 
 volumes:
   tracking_pgdata:
-
-  environment:
-  NODE_OPTIONS: --max-old-space-size=2048
