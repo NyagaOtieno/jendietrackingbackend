@@ -7,7 +7,7 @@ export async function runMariaSync() {
   try {
     client = await pool.connect();
 
-    const remoteRows = await fetchMariaTrackingData(5);
+    const remoteRows = await fetchMariaTrackingData(1);
 
     if (!Array.isArray(remoteRows) || remoteRows.length === 0) {
       return {
@@ -275,3 +275,8 @@ function toNumber(value, fallback = null) {
 }
 console.log("Starting Maria sync...");
 console.log("Fetched rows:", remoteRows.length);
+console.log("Processing device:", normalized.device_uid, "plate:", normalized.plate_number);
+console.log("Before vehicle lookup");
+console.log("Before device lookup");
+console.log("Before telemetry insert");
+console.log("Before latest_positions upsert");
