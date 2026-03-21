@@ -7,7 +7,7 @@ export async function runMariaSync() {
   try {
     client = await pool.connect();
 
-    const remoteRows = await fetchMariaTrackingData(50);
+    const remoteRows = await fetchMariaTrackingData(5);
 
     if (!Array.isArray(remoteRows) || remoteRows.length === 0) {
       return {
