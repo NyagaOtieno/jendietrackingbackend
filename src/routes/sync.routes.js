@@ -1,13 +1,8 @@
 import express from "express";
+import { triggerMariaSync } from "../controllers/sync.controller.js";
 
 const router = express.Router();
 
-router.post("/run", async (_req, res) => {
-  console.log("sync route hit");
-  return res.status(200).json({
-    success: true,
-    message: "Direct route test passed",
-  });
-});
+router.post("/run", triggerMariaSync);
 
 export default router;
