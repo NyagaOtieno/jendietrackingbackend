@@ -1,3 +1,6 @@
+import { pool } from "../config/db.js";
+import { fetchMariaTrackingData } from "./mariaTracking.service.js";
+
 export async function runMariaSync() {
   let client;
 
@@ -12,7 +15,8 @@ export async function runMariaSync() {
     return {
       success: true,
       fetched: remoteRows.length,
-      message: "Fetch only test passed",
+      message: "Fetch-only sync test passed",
+      sample: remoteRows[0] || null,
     };
   } catch (error) {
     console.error("runMariaSync failed:", error);
