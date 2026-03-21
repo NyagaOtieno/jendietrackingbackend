@@ -4,8 +4,8 @@
   "description": "Fleet tracking backend",
   "main": "src/server.js",
   "type": "module",
-  "scripts": {
-    "start": "node src/server.js",
+ "scripts": {
+  "start": "node --max-old-space-size=2048 src/server.js",
     "dev": "node --watch src/server.js"
   },
   "dependencies": {
@@ -15,6 +15,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
+    "mariadb": "^3.5.2",
     "mysql2": "^3.20.0",
     "node-cron": "^4.2.1",
     "pg": "^8.13.3"
