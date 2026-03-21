@@ -1,32 +1,34 @@
 import mariadbPool from "../config/mariadb.js";
 
-export async function fetchMariaTrackingData(limit = 50) {
+export async function fetchMariaTrackingData(limit = 5) {
   let conn;
 
   try {
     conn = await mariadbPool.getConnection();
+
+    const safeLimit = Number.isFinite(Number(limit)) ? Number(limit) : 5;
 
     const query = `
       SELECT
         r.reg_no,
         d.id AS source_device_id,
         d.uniqueid,
-        d.lastupdate,
-        e.id AS event_id,
+        DATE_FORMAT(d.lastupdate, '%Y-%m-%d %H:%i:%s') AS lastupdate,
+        CAST(e.id AS CHAR) AS event_id,
         e.protocol,
         e.deviceid,
-        e.servertime,
-        e.devicetime,
-        e.fixtime,
-        e.valid,
-        e.latitude,
-        e.longitude,
-        e.altitude,
-        e.speed,
-        e.course,
+        DATE_FORMAT(e.servertime, '%Y-%m-%d %H:%i:%s') AS servertime,
+        DATE_FORMAT(e.devicetime, '%Y-%m-%d %H:%i:%s') AS devicetime,
+        DATE_FORMAT(e.fixtime, '%Y-%m-%d %H:%i:%s') AS fixtime,
+        CAST(e.valid AS UNSIGNED) AS valid,
+        CAST(e.latitude AS DECIMAL(12,8)) AS latitude,
+        CAST(e.longitude AS DECIMAL(12,8)) AS longitude,
+        CAST(e.altitude AS DECIMAL(12,2)) AS altitude,
+        CAST(e.speed AS DECIMAL(12,2)) AS speed,
+        CAST(e.course AS DECIMAL(12,2)) AS course,
         e.alarmcode,
-        e.statuscode,
-        e.odometer
+        CAST(e.statuscode AS UNSIGNED) AS statuscode,
+        CAST(e.odometer AS DECIMAL(18,2)) AS odometer
       FROM registration r
       JOIN device d
         ON d.uniqueid = CONCAT('0', r.serial)
@@ -38,10 +40,10 @@ export async function fetchMariaTrackingData(limit = 50) {
         WHERE e2.deviceid = d.id
       )
       ORDER BY e.id DESC
-      LIMIT ?
+      LIMIT ${safeLimit}
     `;
 
-    const [rows] = await conn.query(query, [limit]);
+    const [rows] = await conn.query(query);
     return Array.isArray(rows) ? rows : [];
   } catch (error) {
     console.error("Maria tracking fetch failed:", error);

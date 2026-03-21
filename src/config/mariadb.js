@@ -10,9 +10,12 @@ const mariadbPool = mysql.createPool({
   password: process.env.MARIA_PASSWORD,
   database: process.env.MARIA_DATABASE,
   waitForConnections: true,
-  connectionLimit: 10,
+  connectionLimit: 5,
   queueLimit: 0,
   connectTimeout: 15000,
+  dateStrings: true,
+  supportBigNumbers: true,
+  bigNumberStrings: true,
+  decimalNumbers: true,
 });
-
 export default mariadbPool;
