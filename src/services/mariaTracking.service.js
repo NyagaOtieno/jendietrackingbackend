@@ -1,10 +1,10 @@
-import mariadbPool from "../config/mariadb.js";
+import { getMariaConnection } from "../config/mariadb.js";
 
 export async function fetchMariaTrackingData(limit = 5) {
   let conn;
 
   try {
-    conn = await mariadbPool.getConnection();
+    conn = await getMariaConnection();
 
     const safeLimit = Number.isFinite(Number(limit)) ? Number(limit) : 5;
 
@@ -49,6 +49,6 @@ export async function fetchMariaTrackingData(limit = 5) {
     console.error("Maria tracking fetch failed:", error);
     throw error;
   } finally {
-    if (conn) conn.release();
+    if (conn) await conn.end();
   }
 }

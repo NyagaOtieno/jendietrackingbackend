@@ -270,4 +270,8 @@ function toNumber(value, fallback = null) {
   if (value === null || value === undefined || value === "") return fallback;
   const n = Number(value);
   return Number.isNaN(n) ? fallback : n;
+
+  
 }
+console.log("Starting Maria sync...");
+console.log("Fetched rows:", remoteRows.length);
