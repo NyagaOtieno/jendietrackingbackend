@@ -1,3 +1,4 @@
+
 import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
@@ -10,6 +11,40 @@ import devicesRoutes from "./routes/devices.routes.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import vehiclesRoutes from "./routes/vehicles.routes.js";
 import syncRoutes from "./routes/sync.routes.js";
+import cron from "node-cron";
+import { runMariaSync } from "./services/mariaSync.service.js";
+
+let isRunning = false;
+
+export function startMariaSyncJob() {
+  if (process.env.SYNC_ENABLED !== "true") {
+    console.log("Maria sync job disabled");
+    return;
+  }
+
+  const schedule = process.env.SYNC_CRON || "*/2 * * * *";
+
+  cron.schedule(schedule, async () => {
+    if (isRunning) {
+      console.log("Maria sync skipped: previous run still in progress");
+      return;
+    }
+
+    isRunning = true;
+
+    try {
+      console.log("Maria sync started");
+      const result = await runMariaSync();
+      console.log("Maria sync completed", result);
+    } catch (error) {
+      console.error("Maria sync failed:", error.message);
+    } finally {
+      isRunning = false;
+    }
+  });
+
+  console.log(`Maria sync job scheduled: ${schedule}`);
+}
 
 dotenv.config();
 
@@ -66,6 +101,8 @@ app.use((error, _req, res, _next) => {
 });
 
 const PORT = process.env.PORT || 4000;
+
+startMariaSyncJob();
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Backend running on port ${PORT}`);

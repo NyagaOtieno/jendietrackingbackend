@@ -1,8 +1,22 @@
-import { Router } from "express";
-import { triggerMariaSync } from "../controllers/sync.controller.js";
+import { runMariaSync } from "../services/mariaSync.service.js";
 
-const router = Router();
+export async function triggerMariaSync(_req, res) {
+  try {
+    console.log("triggerMariaSync hit");
 
-router.post("/run", triggerMariaSync);
+    const result = await runMariaSync();
 
-export default router;
+    return res.status(200).json({
+      success: true,
+      message: "Maria sync completed",
+      data: result,
+    });
+  } catch (error) {
+    console.error("Maria sync failed:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Maria sync failed",
+    });
+  }
+}
