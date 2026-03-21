@@ -1,7 +1,7 @@
+
 import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
-
 import { testDbConnection } from "./config/db.js";
 import positionsRoutes from "./routes/positions.routes.js";
 import fleetRoutes from "./routes/fleet.routes.js";
@@ -10,7 +10,7 @@ import seedRoutes from "./routes/seed.routes.js";
 import devicesRoutes from "./routes/devices.routes.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import vehiclesRoutes from "./routes/vehicles.routes.js";
-import syncRoutes from "./routes/sync.routes.js";
+//import syncRoutes from "./routes/sync.routes.js";
 import cron from "node-cron";
 import { runMariaSync } from "./services/mariaSync.service.js";
 
@@ -83,7 +83,7 @@ app.use("/api/devices", devicesRoutes);
 app.use("/api/positions", positionsRoutes);
 app.use("/api/fleet", fleetRoutes);
 app.use("/api/vehicles", vehiclesRoutes);
-app.use("/api/sync", syncRoutes);
+//app.use("/api/sync", syncRoutes);
 
 app.use((req, res) => {
   res.status(404).json({
@@ -102,7 +102,7 @@ app.use((error, _req, res, _next) => {
 
 const PORT = process.env.PORT || 4000;
 
-startMariaSyncJob();
+//startMariaSyncJob();
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Backend running on port ${PORT}`);
