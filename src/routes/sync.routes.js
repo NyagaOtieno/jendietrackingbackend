@@ -1,23 +1,13 @@
 import express from "express";
-import { runMariaSync } from "../services/mariaSync.service.js";
 
 const router = express.Router();
 
-// Trigger manual sync
-router.post("/run", async (req, res) => {
-  try {
-    const result = await runMariaSync();
-    res.json({
-      success: true,
-      message: "Sync completed",
-      data: result,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
+router.post("/run", async (_req, res) => {
+  console.log("sync route hit");
+  return res.status(200).json({
+    success: true,
+    message: "Direct route test passed",
+  });
 });
 
 export default router;
