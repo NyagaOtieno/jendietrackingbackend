@@ -1,6 +1,6 @@
 import mariadbPool from "../config/mariadb.js";
 
-export async function fetchMariaTrackingData(limit = 500) {
+export async function fetchMariaTrackingData(limit = 50) {
   let conn;
 
   try {
@@ -9,16 +9,9 @@ export async function fetchMariaTrackingData(limit = 500) {
     const query = `
       SELECT
         r.reg_no,
-        r.serial AS registration_serial,
-        CONCAT('0', r.serial) AS lookup_uniqueid,
-        r.upd_time AS registration_updated_at,
-
         d.id AS source_device_id,
-        d.name AS device_name,
         d.uniqueid,
         d.lastupdate,
-        d.positionid,
-
         e.id AS event_id,
         e.protocol,
         e.deviceid,
@@ -31,18 +24,9 @@ export async function fetchMariaTrackingData(limit = 500) {
         e.altitude,
         e.speed,
         e.course,
-        e.address,
-        e.attributes,
-        e.accuracy,
-        e.network,
-        e.statuscode,
         e.alarmcode,
-        e.speedlimit,
-        e.odometer,
-        e.isRead,
-        e.signalwireconnected,
-        e.powerwireconnected,
-        e.eactime
+        e.statuscode,
+        e.odometer
       FROM registration r
       JOIN device d
         ON d.uniqueid = CONCAT('0', r.serial)
@@ -60,7 +44,7 @@ export async function fetchMariaTrackingData(limit = 500) {
     const [rows] = await conn.query(query, [limit]);
     return Array.isArray(rows) ? rows : [];
   } catch (error) {
-    console.error("Maria tracking fetch failed:", error?.message || error);
+    console.error("Maria tracking fetch failed:", error);
     throw error;
   } finally {
     if (conn) conn.release();

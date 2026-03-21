@@ -7,7 +7,7 @@ export async function runMariaSync() {
   try {
     client = await pool.connect();
 
-    const remoteRows = await fetchMariaTrackingData(500);
+    const remoteRows = await fetchMariaTrackingData(50);
 
     if (!Array.isArray(remoteRows) || remoteRows.length === 0) {
       return {
@@ -200,7 +200,7 @@ export async function runMariaSync() {
 }
 
 function normalizeTrackingRow(row) {
-  const attributes = safeJsonParse(row.attributes);
+  const attributes = {};
 
   return {
     device_uid: row.uniqueid || null,
