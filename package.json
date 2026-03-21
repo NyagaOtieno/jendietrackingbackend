@@ -5,7 +5,7 @@
   "main": "src/server.js",
   "type": "module",
  "scripts": {
-  "start": "node --max-old-space-size=2048 src/server.js",
+  "start": "node src/server.js",
     "dev": "node --watch src/server.js"
   },
   "dependencies": {
