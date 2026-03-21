@@ -32,7 +32,9 @@ export async function runMariaSync() {
     console.log("🚀 Production Maria Sync Started");
 
     // 1️⃣ Get serials
-    const registrations = await conn.query("SELECT serial FROM registration");
+   const registrations = await conn.query(
+  'SELECT serial FROM registration LIMIT 200'
+);
 
     const serials = registrations.map((r) =>
       r.serial.startsWith("0") ? r.serial : "0" + r.serial
@@ -51,11 +53,26 @@ export async function runMariaSync() {
     );
 
     const deviceMap = new Map();
-    deviceRows.forEach((d) => deviceMap.set(d.uniqueid, d.id));
 
-    console.log(`✅ Matched devices: ${deviceMap.size}`);
+const SERIAL_CHUNK = 50; // 🔴 safe size
 
-    let totalInserted = 0;
+for (let i = 0; i < serials.length; i += SERIAL_CHUNK) {
+  const chunk = serials.slice(i, i + SERIAL_CHUNK);
+
+  console.log(`🔎 Matching devices chunk ${i} - ${i + chunk.length}`);
+
+  const deviceRows = await conn.query(
+    `SELECT id, uniqueid FROM device 
+     WHERE uniqueid IN (${chunk.map(() => "?").join(",")})`,
+    chunk
+  );
+
+  deviceRows.forEach((d) => {
+    deviceMap.set(d.uniqueid, d.id);
+  });
+}
+
+console.log(`✅ Matched devices: ${deviceMap.size}`);
 
     // 3️⃣ PROCESS DEVICES
     for (const [uniqueid, deviceId] of deviceMap.entries()) {
