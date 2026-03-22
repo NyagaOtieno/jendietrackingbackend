@@ -1,6 +1,7 @@
 // src/services/mariaSync.service.js
 import * as mariadb from "mariadb";
 import pkg from "pg";
+import os from "os";
 const { Pool } = pkg;
 
 // 🔵 MariaDB
@@ -12,26 +13,27 @@ const mariaPool = mariadb.createPool({
   connectionLimit: 5,
 });
 
-/// 🟢 PostgreSQL — AUTO DETECT HOST
-import os from "os";
-
+// 🟢 PostgreSQL — AUTO DETECT HOST
 function getPgHost() {
-  // 1️⃣ If environment variable is set, always use it
   if (process.env.PG_HOST) return process.env.PG_HOST;
 
-  // 2️⃣ If inside Docker, use Docker service name
-  // Docker usually has /proc/1/cgroup containing 'docker' or hostname as container ID
-  const cgroup = os.readFileSync("/proc/1/cgroup", "utf8").toLowerCase();
-  if (cgroup.includes("docker") || cgroup.includes("kubepods")) {
-    return "tracking_postgres"; // ✅ Docker network host
+  try {
+    const cgroup = os.readFileSync("/proc/1/cgroup", "utf8").toLowerCase();
+    if (cgroup.includes("docker") || cgroup.includes("kubepods")) {
+      return "tracking_postgres"; // Docker network host
+    }
+  } catch (err) {
+    // ignore
   }
 
-  // 3️⃣ Default for local host / Ubuntu
-  return "127.0.0.1"; // ✅ local Postgres host
+  return "127.0.0.1"; // local Postgres host
 }
 
+const pgHost = getPgHost();
+console.log(`📝 PostgreSQL host selected: ${pgHost}`); // 🔹 debug log
+
 const pgPool = new Pool({
-  host: getPgHost(),
+  host: pgHost,
   port: Number(process.env.PG_PORT) || 5432,
   user: process.env.PG_USER || "postgres",
   password: String(process.env.PG_PASSWORD || "postgres"),
@@ -42,6 +44,7 @@ const pgPool = new Pool({
 // ⚡ CONFIG
 const FETCH_LIMIT = 500;
 const INSERT_BATCH = 500;
+const SERIAL_CHUNK = 50;
 
 export async function runMariaSync() {
   let conn;
@@ -65,9 +68,8 @@ export async function runMariaSync() {
       return { success: true, totalInserted: 0 };
     }
 
-    // 2️⃣ Match MariaDB devices
+    // 2️⃣ Match MariaDB devices and fetch full info
     const mariaDeviceMap = new Map();
-    const SERIAL_CHUNK = 50;
 
     for (let i = 0; i < serials.length; i += SERIAL_CHUNK) {
       const chunk = serials.slice(i, i + SERIAL_CHUNK);
@@ -75,13 +77,13 @@ export async function runMariaSync() {
       console.log(`🔎 Matching devices chunk ${i} - ${i + chunk.length}`);
 
       const devices = await conn.query(
-        `SELECT id, uniqueid FROM device WHERE uniqueid IN (${chunk
-          .map(() => "?")
-          .join(",")})`,
+        `SELECT d.id, d.uniqueid, d.label, d.imei, d.sim_number, d.protocol_type, d.vehicleid AS vehicle_id
+         FROM device d
+         WHERE d.uniqueid IN (${chunk.map(() => "?").join(",")})`,
         chunk
       );
 
-      devices.forEach((d) => mariaDeviceMap.set(d.uniqueid, d.id));
+      devices.forEach((d) => mariaDeviceMap.set(d.uniqueid, d));
     }
 
     console.log(`✅ Matched Maria devices: ${mariaDeviceMap.size}`);
@@ -92,37 +94,46 @@ export async function runMariaSync() {
     );
 
     const pgDeviceMap = new Map();
-   pgDevicesRes.rows.forEach((d) => {
-  pgDeviceMap.set(d.device_uid, d.id);
-});
-   
+    pgDevicesRes.rows.forEach((d) => pgDeviceMap.set(d.device_uid, d.id));
+
     // 4️⃣ PROCESS DEVICES
-    for (const [uniqueid, mariaDeviceId] of mariaDeviceMap.entries()) {
+    for (const [uniqueid, d] of mariaDeviceMap.entries()) {
       console.log(`\n🔄 Processing device ${uniqueid}`);
 
       let pgDeviceId = pgDeviceMap.get(uniqueid);
 
-      // 🔥 AUTO-CREATE DEVICE IF MISSING
+      // 🔥 AUTO-CREATE OR UPDATE DEVICE IF MISSING
       if (!pgDeviceId) {
         console.log(`➕ Creating missing device ${uniqueid}`);
 
         const insertRes = await pgPool.query(
-          `INSERT INTO devices (device_uid)
-           VALUES ($1)
-           ON CONFLICT (device_uid) DO NOTHING
+          `INSERT INTO devices
+           (device_uid, label, imei, sim_number, protocol_type, vehicle_id)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (device_uid) DO UPDATE
+           SET label = EXCLUDED.label,
+               imei = EXCLUDED.imei,
+               sim_number = EXCLUDED.sim_number,
+               protocol_type = EXCLUDED.protocol_type,
+               vehicle_id = EXCLUDED.vehicle_id
            RETURNING id`,
-          [uniqueid]
+          [
+            d.uniqueid,
+            d.label || null,
+            d.imei || null,
+            d.sim_number || null,
+            d.protocol_type || null,
+            d.vehicle_id || null,
+          ]
         );
 
         if (insertRes.rows.length > 0) {
           pgDeviceId = insertRes.rows[0].id;
         } else {
-          // fetch existing
-        const fetchRes = await pgPool.query(
-        `SELECT id FROM devices WHERE device_uid = $1`,
-         [uniqueid]
+          const fetchRes = await pgPool.query(
+            `SELECT id FROM devices WHERE device_uid = $1`,
+            [d.uniqueid]
           );
-          
           pgDeviceId = fetchRes.rows[0]?.id;
         }
 
@@ -140,22 +151,19 @@ export async function runMariaSync() {
         [pgDeviceId]
       );
 
-      let lastSync =
-        lastSyncRes.rows[0].lasttime || "2000-01-01 00:00:00";
-
+      let lastSync = lastSyncRes.rows[0].lasttime || "2000-01-01 00:00:00";
       let hasMore = true;
 
       while (hasMore) {
         console.log(`📡 Fetching after ${lastSync}`);
 
-        // ✅ Fetch from MariaDB
         const events = await conn.query(
           `SELECT deviceid, latitude, longitude, speed, servertime
            FROM eventData
            WHERE deviceid = ? AND servertime > ?
            ORDER BY servertime ASC
            LIMIT ${FETCH_LIMIT}`,
-          [mariaDeviceId, lastSync]
+          [d.id, lastSync]
         );
 
         if (!events.length) {
@@ -165,7 +173,7 @@ export async function runMariaSync() {
 
         console.log(`📦 Batch: ${events.length} rows`);
 
-        // 5️⃣ Insert into Postgres
+        // 5️⃣ Insert into Postgres telemetry in batches
         for (let i = 0; i < events.length; i += INSERT_BATCH) {
           const batch = events.slice(i, i + INSERT_BATCH);
 
@@ -174,24 +182,19 @@ export async function runMariaSync() {
 
           batch.forEach((e, idx) => {
             const base = idx * 5;
-
             placeholders.push(
               `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`
             );
-
-            values.push(
-              pgDeviceId,      // ✅ correct ID
-              e.latitude,
-              e.longitude,
-              e.speed,         // → speed_kph
-              e.servertime     // → device_time
-            );
+            values.push(pgDeviceId, e.latitude, e.longitude, e.speed, e.servertime);
           });
 
           await pgPool.query(
             `INSERT INTO telemetry (device_id, latitude, longitude, speed_kph, device_time)
              VALUES ${placeholders.join(",")}
-             ON CONFLICT (device_id, device_time) DO NOTHING`,
+             ON CONFLICT (device_id, device_time) DO UPDATE
+             SET latitude = EXCLUDED.latitude,
+                 longitude = EXCLUDED.longitude,
+                 speed_kph = EXCLUDED.speed_kph`,
             values
           );
 
@@ -199,17 +202,13 @@ export async function runMariaSync() {
         }
 
         lastSync = events[events.length - 1].servertime;
-
-        if (events.length < FETCH_LIMIT) {
-          hasMore = false;
-        }
+        if (events.length < FETCH_LIMIT) hasMore = false;
       }
 
       console.log(`✅ ${uniqueid} fully synced`);
     }
 
     console.log(`🎯 Total inserted: ${totalInserted}`);
-
     return { success: true, totalInserted };
   } catch (error) {
     console.error("❌ Sync error:", error);
