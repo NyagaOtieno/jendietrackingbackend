@@ -43,18 +43,7 @@ cron.schedule(schedule, async () => {
   }
 });
 
-    isRunning = true;
-
-    try {
-      console.log("Maria sync started");
-      const result = await runMariaSync();
-      console.log("Maria sync completed", result);
-    } catch (error) {
-      console.error("Maria sync failed:", error.message);
-    } finally {
-      isRunning = false;
-    }
-  });
+ 
 
   console.log(`Maria sync job scheduled: ${schedule}`);
 }
