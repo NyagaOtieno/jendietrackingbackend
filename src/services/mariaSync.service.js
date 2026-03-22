@@ -27,17 +27,17 @@ const pgPool = new Pool({
 // 3. Config
 // ----------------------
 const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || '50', 10);
-const SYNC_INTERVAL = parseInt(process.env.SYNC_INTERVAL || '5000', 10); // milliseconds
+const SYNC_INTERVAL = parseInt(process.env.SYNC_INTERVAL || '5000', 10); // ms
 
-// Incremental sync trackers
-let lastDeviceId = 0;
-let lastTelemetryTime = '1970-01-01 00:00:00';
+// Track last sync
+let lastDeviceUpdate = new Date(0);      // Date for device updates
+let lastTelemetryTime = new Date(0);     // Date for telemetry
 
 // ----------------------
-// 4. Main sync function
+// 4. Smart sync function
 // ----------------------
 async function syncMariaToPostgres() {
-  console.log(`📝 PostgreSQL host: ${process.env.PG_HOST} | Sync start at ${new Date().toISOString()}`);
+  console.log(`📝 Sync start | PostgreSQL host: ${process.env.PG_HOST} | ${new Date().toISOString()}`);
 
   let mariaConn;
   const pgClient = await pgPool.connect();
@@ -46,21 +46,21 @@ async function syncMariaToPostgres() {
     mariaConn = await mariaPool.getConnection();
 
     // ----------------------------
-    // 4a. Sync Devices
+    // 4a. Fetch new/updated devices
     // ----------------------------
     const devices = await mariaConn.query(
-      `SELECT d.id, d.uniqueid, d.name, d.phone, d.model, d.contact, d.category, d.disabled, d.createdat,
+      `SELECT d.id, d.uniqueid, d.name, d.phone, d.model, d.contact, d.category, d.disabled, d.createdat, d.lastupdate,
               r.reg_no, r.vmodel, r.simno, r.owner_name, r.owner_contact
        FROM device d
        LEFT JOIN registration r ON r.serial = d.uniqueid
-       WHERE d.id > ?
-       ORDER BY d.id ASC
+       WHERE d.lastupdate > ?
+       ORDER BY d.lastupdate ASC
        LIMIT ?`,
-      [lastDeviceId, BATCH_SIZE]
+      [lastDeviceUpdate, BATCH_SIZE]
     );
 
     if (devices.length > 0) {
-      lastDeviceId = devices[devices.length - 1].id;
+      lastDeviceUpdate = new Date(devices[devices.length - 1].lastupdate);
 
       const deviceValues = [];
       const placeholders = [];
@@ -78,6 +78,7 @@ async function syncMariaToPostgres() {
           d.owner_contact || null,
           d.vmodel || null
         );
+
         placeholders.push(
           `($${i * 10 + 1}, $${i * 10 + 2}, $${i * 10 + 3}, $${i * 10 + 4}, $${i * 10 + 5}, $${i * 10 + 6}, $${i * 10 + 7}, $${i * 10 + 8}, $${i * 10 + 9}, $${i * 10 + 10})`
         );
@@ -104,7 +105,7 @@ async function syncMariaToPostgres() {
     }
 
     // ----------------------------
-    // 4b. Sync Telemetry
+    // 4b. Fetch incremental telemetry
     // ----------------------------
     const telemetry = await mariaConn.query(
       `SELECT e.deviceid, e.latitude, e.longitude, e.altitude, e.speed, e.course, e.address, e.attributes,
@@ -118,7 +119,7 @@ async function syncMariaToPostgres() {
     );
 
     if (telemetry.length > 0) {
-      lastTelemetryTime = telemetry[telemetry.length - 1].device_time;
+      lastTelemetryTime = new Date(telemetry[telemetry.length - 1].device_time);
 
       const teleValues = [];
       const telePlaceholders = [];
