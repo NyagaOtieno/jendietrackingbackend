@@ -71,14 +71,14 @@ export async function runMariaSync() {
 
     // 3️⃣ Load PostgreSQL devices
     const pgDevicesRes = await pgPool.query(
-      `SELECT id, unique_id FROM devices`
+      `SELECT id, device_uid FROM devices`
     );
 
     const pgDeviceMap = new Map();
-    pgDevicesRes.rows.forEach((d) => {
-      pgDeviceMap.set(d.unique_id, d.id);
-    });
-
+   pgDevicesRes.rows.forEach((d) => {
+  pgDeviceMap.set(d.device_uid, d.id);
+});
+   
     // 4️⃣ PROCESS DEVICES
     for (const [uniqueid, mariaDeviceId] of mariaDeviceMap.entries()) {
       console.log(`\n🔄 Processing device ${uniqueid}`);
@@ -90,9 +90,9 @@ export async function runMariaSync() {
         console.log(`➕ Creating missing device ${uniqueid}`);
 
         const insertRes = await pgPool.query(
-          `INSERT INTO devices (unique_id)
+          `INSERT INTO devices (device_uid)
            VALUES ($1)
-           ON CONFLICT (unique_id) DO NOTHING
+           ON CONFLICT (device_uid) DO NOTHING
            RETURNING id`,
           [uniqueid]
         );
@@ -101,10 +101,11 @@ export async function runMariaSync() {
           pgDeviceId = insertRes.rows[0].id;
         } else {
           // fetch existing
-          const fetchRes = await pgPool.query(
-            `SELECT id FROM devices WHERE unique_id = $1`,
-            [uniqueid]
+        const fetchRes = await pgPool.query(
+        `SELECT id FROM devices WHERE device_uid = $1`,
+         [uniqueid]
           );
+          
           pgDeviceId = fetchRes.rows[0]?.id;
         }
 
