@@ -29,12 +29,11 @@ const pgPool = new Pool({
 const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || '50', 10);
 const SYNC_INTERVAL = parseInt(process.env.SYNC_INTERVAL || '5000', 10); // ms
 
-// Track last sync
-let lastDeviceUpdate = new Date(0);      // Date for device updates
-let lastTelemetryTime = new Date(0);     // Date for telemetry
+let lastDeviceUpdate = new Date(0);
+let lastTelemetryTime = new Date(0);
 
 // ----------------------
-// 4. Smart sync function
+// 4. Sync function
 // ----------------------
 async function syncMariaToPostgres() {
   console.log(`📝 Sync start | PostgreSQL host: ${process.env.PG_HOST} | ${new Date().toISOString()}`);
@@ -46,7 +45,7 @@ async function syncMariaToPostgres() {
     mariaConn = await mariaPool.getConnection();
 
     // ----------------------------
-    // 4a. Fetch new/updated devices
+    // 4a. Devices
     // ----------------------------
     const devices = await mariaConn.query(
       `SELECT d.id, d.uniqueid, d.name, d.phone, d.model, d.contact, d.category, d.disabled, d.createdat, d.lastupdate,
@@ -67,13 +66,13 @@ async function syncMariaToPostgres() {
 
       devices.forEach((d, i) => {
         deviceValues.push(
-          d.uniqueid,         // device_uid
-          d.reg_no || d.name, // label
-          d.simno || d.phone, // sim_number
-          d.category || null, // protocol_type
-          d.model || null,    // model
-          d.contact || null,  // contact
-          d.disabled === 1,   // disabled boolean
+          d.uniqueid,
+          d.reg_no || d.name,
+          d.simno || d.phone,
+          d.category || null,
+          d.model || null,
+          d.contact || null,
+          d.disabled === 1,
           d.owner_name || null,
           d.owner_contact || null,
           d.vmodel || null
@@ -105,7 +104,7 @@ async function syncMariaToPostgres() {
     }
 
     // ----------------------------
-    // 4b. Fetch incremental telemetry
+    // 4b. Telemetry
     // ----------------------------
     const telemetry = await mariaConn.query(
       `SELECT e.deviceid, e.latitude, e.longitude, e.altitude, e.speed, e.course, e.address, e.attributes,
@@ -168,7 +167,7 @@ async function syncMariaToPostgres() {
   } catch (err) {
     console.error('❌ Sync error:', err.message || err);
   } finally {
-    if (mariaConn) mariaConn.end();
+    if (mariaConn) await mariaConn.end();
     pgClient.release();
   }
 }
