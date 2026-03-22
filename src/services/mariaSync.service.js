@@ -2,6 +2,7 @@ import * as mariadb from "mariadb";
 import pkg from "pg";
 const { Pool } = pkg;
 
+ let totalInserted = 0;
 // 🔵 MariaDB
 const mariaPool = mariadb.createPool({
   host: "18.218.110.222",
@@ -140,7 +141,7 @@ console.log(`✅ Matched devices: ${deviceMap.size}`);
             values
           );
           
-          let totalInserted = 0;
+        
           totalInserted += batch.length;
         }
 
