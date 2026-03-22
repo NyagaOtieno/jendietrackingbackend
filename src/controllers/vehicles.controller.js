@@ -1,22 +1,13 @@
+// src/controllers/vehicles.controller.js
 import { query } from "../config/db.js";
 import { isPrivilegedRole } from "../middleware/auth.js";
 
-/**
- * Returns true if the user can access all accounts
- */
 function canAccessAccountData(req) {
   return isPrivilegedRole(req.user.role);
 }
 
-/**
- * GET /vehicles
- * Returns all vehicles, optionally filtered by account_id
- */
 export async function getVehicles(req, res) {
   try {
-    // Ensure accountId is integer or null
-    const userAccountId = parseInt(req.user.accountId, 10) || null;
-
     let sql = `
       SELECT
         v.id,
@@ -39,7 +30,8 @@ export async function getVehicles(req, res) {
 
     if (!canAccessAccountData(req)) {
       sql += ` WHERE v.account_id = $1 `;
-      params.push(userAccountId);
+      const accId = parseInt(req.user.accountId, 10);
+      params.push(isNaN(accId) ? 0 : accId);
     }
 
     sql += ` ORDER BY v.created_at DESC`;
@@ -52,7 +44,6 @@ export async function getVehicles(req, res) {
     });
   } catch (error) {
     console.error("getVehicles error:", error);
-    console.error("Check if req.user.accountId is a valid integer:", req.user.accountId);
     return res.status(500).json({
       success: false,
       message: "Failed to load vehicles. Check server logs for guidance.",
@@ -60,23 +51,9 @@ export async function getVehicles(req, res) {
   }
 }
 
-/**
- * GET /vehicles/:id
- * Returns a single vehicle by ID
- */
 export async function getVehicleById(req, res) {
   try {
     const { id } = req.params;
-    const vehicleId = parseInt(id, 10);
-
-    if (isNaN(vehicleId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid vehicle ID",
-      });
-    }
-
-    const userAccountId = parseInt(req.user.accountId, 10) || null;
 
     let sql = `
       SELECT
@@ -97,11 +74,12 @@ export async function getVehicleById(req, res) {
       WHERE v.id = $1
     `;
 
-    const params = [vehicleId];
+    const params = [parseInt(id, 10)];
 
     if (!canAccessAccountData(req)) {
       sql += ` AND v.account_id = $2 `;
-      params.push(userAccountId);
+      const accId = parseInt(req.user.accountId, 10);
+      params.push(isNaN(accId) ? 0 : accId);
     }
 
     const result = await query(sql, params);
@@ -119,29 +97,16 @@ export async function getVehicleById(req, res) {
     });
   } catch (error) {
     console.error("getVehicleById error:", error);
-    console.error("Check if req.user.accountId is valid:", req.user.accountId);
     return res.status(500).json({
       success: false,
-      message: "Failed to load vehicle. Check server logs for guidance.",
+      message: "Failed to load vehicle",
     });
   }
 }
 
-/**
- * POST /vehicles
- * Creates a new vehicle
- */
 export async function createVehicle(req, res) {
   try {
-    const {
-      plate_number,
-      unit_name = null,
-      make = null,
-      model = null,
-      year = null,
-      account_id = null,
-      status = "active",
-    } = req.body;
+    const { plate_number, unit_name = null, make = null, model = null, year = null, account_id = null, status = "active" } = req.body;
 
     if (!plate_number) {
       return res.status(400).json({
@@ -150,21 +115,15 @@ export async function createVehicle(req, res) {
       });
     }
 
+    const accId = account_id != null ? parseInt(account_id, 10) : null;
+
     const result = await query(
       `
-      INSERT INTO vehicles (
-        plate_number,
-        unit_name,
-        make,
-        model,
-        year,
-        account_id,
-        status
-      )
+      INSERT INTO vehicles (plate_number, unit_name, make, model, year, account_id, status)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING *
       `,
-      [plate_number, unit_name, make, model, year, account_id, status]
+      [plate_number, unit_name, make, model, year, accId, status]
     );
 
     return res.status(201).json({
@@ -175,59 +134,29 @@ export async function createVehicle(req, res) {
     console.error("createVehicle error:", error);
     return res.status(500).json({
       success: false,
-      message: "Failed to create vehicle. Check server logs for guidance.",
+      message: "Failed to create vehicle",
     });
   }
 }
 
-/**
- * PUT /vehicles/:id
- * Updates an existing vehicle
- */
 export async function updateVehicle(req, res) {
   try {
     const { id } = req.params;
-    const vehicleId = parseInt(id, 10);
-
-    if (isNaN(vehicleId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid vehicle ID",
-      });
-    }
-
-    const existing = await query(`SELECT * FROM vehicles WHERE id = $1`, [vehicleId]);
+    const existing = await query(`SELECT * FROM vehicles WHERE id = $1`, [parseInt(id, 10)]);
 
     if (!existing.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Vehicle not found",
-      });
+      return res.status(404).json({ success: false, message: "Vehicle not found" });
     }
 
     const current = existing.rows[0];
-    const {
-      plate_number,
-      unit_name,
-      make,
-      model,
-      year,
-      account_id,
-      status,
-    } = req.body;
+    const { plate_number, unit_name, make, model, year, account_id, status } = req.body;
+
+    const accId = account_id != null ? parseInt(account_id, 10) : current.account_id;
 
     const result = await query(
       `
       UPDATE vehicles
-      SET
-        plate_number = $1,
-        unit_name = $2,
-        make = $3,
-        model = $4,
-        year = $5,
-        account_id = $6,
-        status = $7,
-        updated_at = NOW()
+      SET plate_number = $1, unit_name = $2, make = $3, model = $4, year = $5, account_id = $6, status = $7, updated_at = NOW()
       WHERE id = $8
       RETURNING *
       `,
@@ -237,9 +166,9 @@ export async function updateVehicle(req, res) {
         make ?? current.make,
         model ?? current.model,
         year ?? current.year,
-        account_id ?? current.account_id,
+        accId,
         status ?? current.status,
-        vehicleId,
+        id,
       ]
     );
 
@@ -249,50 +178,23 @@ export async function updateVehicle(req, res) {
     });
   } catch (error) {
     console.error("updateVehicle error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update vehicle. Check server logs for guidance.",
-    });
+    return res.status(500).json({ success: false, message: "Failed to update vehicle" });
   }
 }
 
-/**
- * DELETE /vehicles/:id
- * Deletes a vehicle
- */
 export async function deleteVehicle(req, res) {
   try {
     const { id } = req.params;
-    const vehicleId = parseInt(id, 10);
 
-    if (isNaN(vehicleId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid vehicle ID",
-      });
-    }
-
-    const result = await query(
-      `DELETE FROM vehicles WHERE id = $1 RETURNING id`,
-      [vehicleId]
-    );
+    const result = await query(`DELETE FROM vehicles WHERE id = $1 RETURNING id`, [parseInt(id, 10)]);
 
     if (!result.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Vehicle not found",
-      });
+      return res.status(404).json({ success: false, message: "Vehicle not found" });
     }
 
-    return res.json({
-      success: true,
-      message: "Vehicle deleted",
-    });
+    return res.json({ success: true, message: "Vehicle deleted" });
   } catch (error) {
     console.error("deleteVehicle error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to delete vehicle. Check server logs for guidance.",
-    });
+    return res.status(500).json({ success: false, message: "Failed to delete vehicle" });
   }
 }
