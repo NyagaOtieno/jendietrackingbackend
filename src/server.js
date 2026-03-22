@@ -22,13 +22,26 @@ export function startMariaSyncJob() {
     return;
   }
 
-  const schedule = process.env.SYNC_CRON || "*/2 * * * *";
+ let schedule = process.env.SYNC_CRON;
+if (!schedule || !/^[\d\*\/,\- ]+$/.test(schedule)) {
+  console.warn("Invalid SYNC_CRON value, falling back to safe default");
+  schedule = "*/2 * * * *";
+}
 
-  cron.schedule(schedule, async () => {
-    if (isRunning) {
-      console.log("Maria sync skipped: previous run still in progress");
-      return;
-    }
+cron.schedule(schedule, async () => {
+  if (isRunning) {
+    console.log("Maria sync skipped: previous run still in progress");
+    return;
+  }
+  isRunning = true;
+  try {
+    await startMariaSyncJob();
+  } catch (err) {
+    console.error("Maria sync job failed:", err);
+  } finally {
+    isRunning = false;
+  }
+});
 
     isRunning = true;
 
