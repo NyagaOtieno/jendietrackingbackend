@@ -12,11 +12,26 @@ const mariaPool = mariadb.createPool({
   connectionLimit: 5,
 });
 
-// 🟢 PostgreSQL
-const isLocal = process.env.NODE_ENV !== "production"; // detect host mode
+/// 🟢 PostgreSQL — AUTO DETECT HOST
+import os from "os";
+
+function getPgHost() {
+  // 1️⃣ If environment variable is set, always use it
+  if (process.env.PG_HOST) return process.env.PG_HOST;
+
+  // 2️⃣ If inside Docker, use Docker service name
+  // Docker usually has /proc/1/cgroup containing 'docker' or hostname as container ID
+  const cgroup = os.readFileSync("/proc/1/cgroup", "utf8").toLowerCase();
+  if (cgroup.includes("docker") || cgroup.includes("kubepods")) {
+    return "tracking_postgres"; // ✅ Docker network host
+  }
+
+  // 3️⃣ Default for local host / Ubuntu
+  return "127.0.0.1"; // ✅ local Postgres host
+}
 
 const pgPool = new Pool({
-  host: isLocal ? "127.0.0.1" : process.env.PG_HOST || "tracking_postgres", // 🔥 force localhost if running outside Docker
+  host: getPgHost(),
   port: Number(process.env.PG_PORT) || 5432,
   user: process.env.PG_USER || "postgres",
   password: String(process.env.PG_PASSWORD || "postgres"),
