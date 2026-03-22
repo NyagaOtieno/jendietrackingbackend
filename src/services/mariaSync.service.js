@@ -3,39 +3,38 @@ import * as mariadb from "mariadb";
 import pkg from "pg";
 const { Pool } = pkg;
 
-let totalInserted = 0;
-
-// 🔵 MariaDB connection pool
+// 🔵 MariaDB
 const mariaPool = mariadb.createPool({
-  host: "18.218.110.222",
-  user: "root",
-  password: "nairobiyetu",
-  database: "uradi",
+  host: process.env.MARIA_HOST || "18.218.110.222",
+  user: process.env.MARIA_USER || "root",
+  password: process.env.MARIA_PASSWORD || "nairobiyetu",
+  database: process.env.MARIA_DB || "uradi",
   connectionLimit: 5,
 });
 
-// 🟢 PostgreSQL connection pool
+// 🟢 PostgreSQL
 const pgPool = new Pool({
-  host: process.env.PG_HOST || "127.0.0.1",
+  host: process.env.PG_HOST || "tracking_postgres",
   port: Number(process.env.PG_PORT) || 5432,
   user: process.env.PG_USER || "postgres",
-  password: process.env.PG_PASSWORD || "postgres",
+  password: String(process.env.PG_PASSWORD || "postgres"),
   database: process.env.PG_DATABASE || "tracking_platform",
   ssl: process.env.PG_SSL === "true" ? { rejectUnauthorized: false } : false,
 });
 
 // ⚡ CONFIG
-const FETCH_LIMIT = 500;   // Max rows per fetch from MariaDB
-const INSERT_BATCH = 500;  // Max rows per insert to Postgres
+const FETCH_LIMIT = 500;
+const INSERT_BATCH = 500;
 
 export async function runMariaSync() {
   let conn;
+  let totalInserted = 0;
 
   try {
     conn = await mariaPool.getConnection();
     console.log("🚀 Production Maria Sync Started");
 
-    // 1️⃣ Fetch serials from MariaDB
+    // 1️⃣ Get serials
     const registrations = await conn.query(
       "SELECT serial FROM registration LIMIT 200"
     );
@@ -49,9 +48,9 @@ export async function runMariaSync() {
       return { success: true, totalInserted: 0 };
     }
 
-    // 2️⃣ MATCH DEVICES in MariaDB
-    const deviceMap = new Map();
-    const SERIAL_CHUNK = 50; // safe chunk size
+    // 2️⃣ Match MariaDB devices
+    const mariaDeviceMap = new Map();
+    const SERIAL_CHUNK = 50;
 
     for (let i = 0; i < serials.length; i += SERIAL_CHUNK) {
       const chunk = serials.slice(i, i + SERIAL_CHUNK);
@@ -65,19 +64,62 @@ export async function runMariaSync() {
         chunk
       );
 
-      devices.forEach((d) => deviceMap.set(d.uniqueid, d.id));
+      devices.forEach((d) => mariaDeviceMap.set(d.uniqueid, d.id));
     }
 
-    console.log(`✅ Matched devices: ${deviceMap.size}`);
+    console.log(`✅ Matched Maria devices: ${mariaDeviceMap.size}`);
 
-    // 3️⃣ PROCESS DEVICES
-    for (const [uniqueid, deviceId] of deviceMap.entries()) {
+    // 3️⃣ Load PostgreSQL devices
+    const pgDevicesRes = await pgPool.query(
+      `SELECT id, unique_id FROM devices`
+    );
+
+    const pgDeviceMap = new Map();
+    pgDevicesRes.rows.forEach((d) => {
+      pgDeviceMap.set(d.unique_id, d.id);
+    });
+
+    // 4️⃣ PROCESS DEVICES
+    for (const [uniqueid, mariaDeviceId] of mariaDeviceMap.entries()) {
       console.log(`\n🔄 Processing device ${uniqueid}`);
 
-      // Get last sync timestamp from Postgres
+      let pgDeviceId = pgDeviceMap.get(uniqueid);
+
+      // 🔥 AUTO-CREATE DEVICE IF MISSING
+      if (!pgDeviceId) {
+        console.log(`➕ Creating missing device ${uniqueid}`);
+
+        const insertRes = await pgPool.query(
+          `INSERT INTO devices (unique_id)
+           VALUES ($1)
+           ON CONFLICT (unique_id) DO NOTHING
+           RETURNING id`,
+          [uniqueid]
+        );
+
+        if (insertRes.rows.length > 0) {
+          pgDeviceId = insertRes.rows[0].id;
+        } else {
+          // fetch existing
+          const fetchRes = await pgPool.query(
+            `SELECT id FROM devices WHERE unique_id = $1`,
+            [uniqueid]
+          );
+          pgDeviceId = fetchRes.rows[0]?.id;
+        }
+
+        pgDeviceMap.set(uniqueid, pgDeviceId);
+      }
+
+      if (!pgDeviceId) {
+        console.log(`⏭️ Skipping ${uniqueid} (failed to create)`);
+        continue;
+      }
+
+      // 🔁 Get last sync
       const lastSyncRes = await pgPool.query(
         `SELECT MAX(device_time) AS lasttime FROM telemetry WHERE device_id = $1`,
-        [deviceId]
+        [pgDeviceId]
       );
 
       let lastSync =
@@ -88,13 +130,14 @@ export async function runMariaSync() {
       while (hasMore) {
         console.log(`📡 Fetching after ${lastSync}`);
 
+        // ✅ Fetch from MariaDB
         const events = await conn.query(
-          `SELECT deviceid, latitude, longitude, speed AS speed_kph, servertime AS device_time
+          `SELECT deviceid, latitude, longitude, speed, servertime
            FROM eventData
            WHERE deviceid = ? AND servertime > ?
            ORDER BY servertime ASC
            LIMIT ${FETCH_LIMIT}`,
-          [deviceId, lastSync]
+          [mariaDeviceId, lastSync]
         );
 
         if (!events.length) {
@@ -104,7 +147,7 @@ export async function runMariaSync() {
 
         console.log(`📦 Batch: ${events.length} rows`);
 
-        // Insert into Postgres in smaller batches
+        // 5️⃣ Insert into Postgres
         for (let i = 0; i < events.length; i += INSERT_BATCH) {
           const batch = events.slice(i, i + INSERT_BATCH);
 
@@ -113,16 +156,17 @@ export async function runMariaSync() {
 
           batch.forEach((e, idx) => {
             const base = idx * 5;
+
             placeholders.push(
               `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`
             );
 
             values.push(
-              deviceId,
+              pgDeviceId,      // ✅ correct ID
               e.latitude,
               e.longitude,
-              e.speed_kph,
-              e.device_time
+              e.speed,         // → speed_kph
+              e.servertime     // → device_time
             );
           });
 
@@ -136,8 +180,7 @@ export async function runMariaSync() {
           totalInserted += batch.length;
         }
 
-        // Move forward cursor
-        lastSync = events[events.length - 1].device_time;
+        lastSync = events[events.length - 1].servertime;
 
         if (events.length < FETCH_LIMIT) {
           hasMore = false;
