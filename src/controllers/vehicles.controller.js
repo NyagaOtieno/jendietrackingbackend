@@ -7,19 +7,21 @@ function canAccessAccountData(req) {
 
 export async function getVehicles(req, res) {
   try {
+    // Query all vehicles with left join to accounts
     let sql = `
       SELECT
         v.id,
         v.plate_number,
-        v.unit_name,
-        v.make,
-        v.model,
-        v.year,
-        v.account_id,
+        COALESCE(v.unit_name, '') AS unit_name,
+        COALESCE(v.make, '') AS make,
+        COALESCE(v.model, '') AS model,
+        COALESCE(v.year, '') AS year,
+        COALESCE(v.account_id, 0) AS account_id,
         a.account_name,
         a.account_type,
-        v.status,
-        v.created_at
+        COALESCE(v.status, 'active') AS status,
+        v.created_at,
+        v.updated_at
       FROM vehicles v
       LEFT JOIN accounts a ON a.id = v.account_id
     `;
@@ -56,15 +58,16 @@ export async function getVehicleById(req, res) {
       SELECT
         v.id,
         v.plate_number,
-        v.unit_name,
-        v.make,
-        v.model,
-        v.year,
-        v.account_id,
+        COALESCE(v.unit_name, '') AS unit_name,
+        COALESCE(v.make, '') AS make,
+        COALESCE(v.model, '') AS model,
+        COALESCE(v.year, '') AS year,
+        COALESCE(v.account_id, 0) AS account_id,
         a.account_name,
         a.account_type,
-        v.status,
-        v.created_at
+        COALESCE(v.status, 'active') AS status,
+        v.created_at,
+        v.updated_at
       FROM vehicles v
       LEFT JOIN accounts a ON a.id = v.account_id
       WHERE v.id = $1
@@ -182,7 +185,8 @@ export async function updateVehicle(req, res) {
         model = $4,
         year = $5,
         account_id = $6,
-        status = $7
+        status = $7,
+        updated_at = NOW()
       WHERE id = $8
       RETURNING *
       `,
