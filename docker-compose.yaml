@@ -28,6 +28,7 @@ services:
         condition: service_healthy
     env_file:
       - .env
+      - .env.local
     environment:
       PORT: 4000
       NODE_ENV: production
