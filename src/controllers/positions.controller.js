@@ -3,6 +3,7 @@ import * as geo from "../services/reverseGeocode.js";
 import { normalizeLimit } from "../utils/sql.js";
 import { isPrivilegedRole } from "../middleware/auth.js";
 
+// Safe reverse geocode helper
 async function safeLocationName(lat, lon) {
   try {
     return (await geo.getLocationName(lat, lon)) || "Unknown location";
@@ -11,10 +12,12 @@ async function safeLocationName(lat, lon) {
   }
 }
 
+// Check if user can access all accounts
 function isPrivileged(req) {
   return isPrivilegedRole(req.user.role);
 }
 
+// Load latest positions from latest_positions table
 async function loadLatestFromDb(req) {
   const params = [];
   let sql = `
@@ -22,10 +25,10 @@ async function loadLatestFromDb(req) {
       d.device_uid AS "deviceUid",
       lp.latitude AS lat,
       lp.longitude AS lon,
-      lp.speed_kph AS "speedKph",
-      lp.heading,
-      lp.device_time AS "deviceTime",
-      lp.received_at AS "receivedAt",
+      lp.speed AS "speedKph",
+      NULL AS heading,               -- replace with real column if exists
+      lp.timestamp AS "deviceTime",
+      lp.timestamp AS "receivedAt",
       v.id AS "vehicleId",
       v.plate_number AS "plateNumber",
       v.unit_name AS "unitName",
@@ -37,15 +40,16 @@ async function loadLatestFromDb(req) {
 
   if (!isPrivileged(req)) {
     sql += ` WHERE v.account_id = $1 `;
-    params.push(req.user.accountId || null);
+    params.push(parseInt(req.user.accountId, 10) || null);
   }
 
-  sql += ` ORDER BY lp.received_at DESC `;
+  sql += ` ORDER BY lp.timestamp DESC `;
 
   const result = await query(sql, params);
   return result.rows;
 }
 
+// Load history from telemetry table
 async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
   const clauses = [`d.device_uid = $1`];
   const params = [deviceUid];
@@ -53,7 +57,7 @@ async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
 
   if (!isPrivileged(req)) {
     clauses.push(`v.account_id = $${index++}`);
-    params.push(req.user.accountId || null);
+    params.push(parseInt(req.user.accountId, 10) || null);
   }
 
   if (from) {
@@ -94,6 +98,8 @@ async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
   return result.rows;
 }
 
+// ------------------- API Controllers -------------------
+
 export async function getLatestPositions(req, res) {
   try {
     const rows = await loadLatestFromDb(req);
@@ -105,15 +111,12 @@ export async function getLatestPositions(req, res) {
       }))
     );
 
-    return res.json({
-      success: true,
-      data: enriched,
-    });
+    return res.json({ success: true, data: enriched });
   } catch (error) {
     console.error("getLatestPositions error:", error);
     return res.status(500).json({
       success: false,
-      message: "Failed to load latest positions",
+      message: "Failed to load latest positions — check logs for details",
     });
   }
 }
@@ -139,10 +142,7 @@ export async function getHistory(req, res) {
       }))
     );
 
-    return res.json({
-      success: true,
-      data: enriched,
-    });
+    return res.json({ success: true, data: enriched });
   } catch (error) {
     console.error("getHistory error:", error);
     return res.status(500).json({
@@ -173,13 +173,7 @@ export async function createPosition(req, res) {
         heading,
         device_time
       )
-      SELECT
-        d.id,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6
+      SELECT d.id, $2, $3, $4, $5, $6
       FROM devices d
       WHERE d.device_uid = $1
       RETURNING
@@ -201,13 +195,7 @@ export async function createPosition(req, res) {
       });
     }
 
-    return res.status(201).json({
-      success: true,
-      data: {
-        deviceUid,
-        ...result.rows[0],
-      },
-    });
+    return res.status(201).json({ success: true, data: { deviceUid, ...result.rows[0] } });
   } catch (error) {
     console.error("createPosition error:", error);
     return res.status(500).json({
@@ -244,27 +232,17 @@ export async function getPositionById(req, res) {
 
     if (!isPrivileged(req)) {
       sql += ` AND v.account_id = $2 `;
-      params.push(req.user.accountId || null);
+      params.push(parseInt(req.user.accountId, 10) || null);
     }
 
     const result = await query(sql, params);
 
     if (!result.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Position not found",
-      });
+      return res.status(404).json({ success: false, message: "Position not found" });
     }
 
     const row = result.rows[0];
-
-    return res.json({
-      success: true,
-      data: {
-        ...row,
-        locationName: await safeLocationName(row.lat, row.lon),
-      },
-    });
+    return res.json({ success: true, data: { ...row, locationName: await safeLocationName(row.lat, row.lon) } });
   } catch (error) {
     console.error("getPositionById error:", error);
     return res.status(500).json({
@@ -282,10 +260,7 @@ export async function updatePosition(req, res) {
     const existing = await query(`SELECT * FROM telemetry WHERE id = $1`, [id]);
 
     if (!existing.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Position not found",
-      });
+      return res.status(404).json({ success: false, message: "Position not found" });
     }
 
     const current = existing.rows[0];
@@ -319,16 +294,10 @@ export async function updatePosition(req, res) {
       ]
     );
 
-    return res.json({
-      success: true,
-      data: result.rows[0],
-    });
+    return res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error("updatePosition error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update position",
-    });
+    return res.status(500).json({ success: false, message: "Failed to update position" });
   }
 }
 
@@ -336,27 +305,15 @@ export async function deletePosition(req, res) {
   try {
     const { id } = req.params;
 
-    const result = await query(
-      `DELETE FROM telemetry WHERE id = $1 RETURNING id`,
-      [id]
-    );
+    const result = await query(`DELETE FROM telemetry WHERE id = $1 RETURNING id`, [id]);
 
     if (!result.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Position not found",
-      });
+      return res.status(404).json({ success: false, message: "Position not found" });
     }
 
-    return res.json({
-      success: true,
-      message: "Position deleted",
-    });
+    return res.json({ success: true, message: "Position deleted" });
   } catch (error) {
     console.error("deletePosition error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to delete position",
-    });
+    return res.status(500).json({ success: false, message: "Failed to delete position" });
   }
 }
