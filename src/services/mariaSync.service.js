@@ -13,8 +13,10 @@ const mariaPool = mariadb.createPool({
 });
 
 // 🟢 PostgreSQL
+const isLocal = process.env.NODE_ENV !== "production"; // detect host mode
+
 const pgPool = new Pool({
-  host: process.env.PG_HOST || "tracking_postgres",
+  host: isLocal ? "127.0.0.1" : process.env.PG_HOST || "tracking_postgres", // 🔥 force localhost if running outside Docker
   port: Number(process.env.PG_PORT) || 5432,
   user: process.env.PG_USER || "postgres",
   password: String(process.env.PG_PASSWORD || "postgres"),
