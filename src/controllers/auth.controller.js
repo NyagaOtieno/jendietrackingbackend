@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { query } from "../config/db.js";
 
+// Sign JWT for user
 function signUser(user) {
   return jwt.sign(
     {
@@ -18,6 +19,7 @@ function signUser(user) {
   );
 }
 
+// Map DB user to API response
 function mapUser(user) {
   return {
     id: user.id,
@@ -32,6 +34,7 @@ function mapUser(user) {
   };
 }
 
+// Register new user
 export async function register(req, res) {
   try {
     const {
@@ -122,6 +125,7 @@ export async function register(req, res) {
   }
 }
 
+// Login existing user
 export async function login(req, res) {
   try {
     const { login, password } = req.body;
@@ -152,6 +156,7 @@ export async function login(req, res) {
       });
     }
 
+    // FIX: use password_hash
     const valid = await bcrypt.compare(password, user.password_hash);
 
     if (!valid) {
@@ -187,6 +192,7 @@ export async function login(req, res) {
   }
 }
 
+// Get current logged-in user
 export async function getMe(req, res) {
   try {
     const result = await query(
