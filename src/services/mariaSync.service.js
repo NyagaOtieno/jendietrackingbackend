@@ -14,11 +14,11 @@ const mariaPool = mariadb.createPool({
 
 // 🟢 PostgreSQL
 const pgPool = new Pool({
-  host: "100.50.173.65",
-  user: "postgres",
-  password: "postgres",
-  database: "tracking_platform",
-  port: 5432,
+  host: process.env.PG_HOST,
+  user: process.env.PG_USER,
+  password: process.env.PG_PASSWORD,
+  database: process.env.PG_DATABASE,
+  port: process.env.PG_PORT,
 });
 
 // ⚡ CONFIG
