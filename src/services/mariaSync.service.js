@@ -14,7 +14,7 @@ const mariaPool = mariadb.createPool({
 
 // 🟢 PostgreSQL
 const pgPool = new Pool({
-  host: "db",
+  host: "100.50.173.65",
   user: "postgres",
   password: "postgres",
   database: "tracking_platform",
