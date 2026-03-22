@@ -12,26 +12,34 @@ export async function getVehicles(req, res) {
       SELECT
         v.id,
         v.plate_number,
-        COALESCE(v.unit_name, '') AS unit_name,
-        COALESCE(v.make, '') AS make,
-        COALESCE(v.model, '') AS model,
-        COALESCE(v.year, 0) AS year,
-        COALESCE(v.account_id, 0) AS account_id,
+        v.unit_name,
+        v.make,
+        v.model,
+        v.year,
+        v.account_id,
         a.account_name,
         a.account_type,
-        COALESCE(v.status, 'active') AS status,
-        v.created_at,
-        v.updated_at
+        v.status,
+        v.created_at
       FROM vehicles v
       LEFT JOIN accounts a ON a.id = v.account_id
     `;
 
     const params = [];
 
+    // ✅ SAFE FILTERING
     if (!canAccessAccountData(req)) {
+      const accountId = Number(req.user.accountId);
+
+      if (!accountId) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid accountId on user",
+        });
+      }
+
       sql += ` WHERE v.account_id = $1 `;
-      const accId = parseInt(req.user.accountId, 10);
-      params.push(isNaN(accId) ? 0 : accId);
+      params.push(accountId);
     }
 
     sql += ` ORDER BY v.created_at DESC`;
