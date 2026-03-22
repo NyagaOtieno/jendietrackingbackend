@@ -152,7 +152,7 @@ export async function login(req, res) {
       });
     }
 
-    const valid = await bcrypt.compare(password, user.password_hash);
+    const valid = await bcrypt.compare(password, user.password);
 
     if (!valid) {
       return res.status(401).json({
