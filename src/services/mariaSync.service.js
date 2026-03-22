@@ -5,9 +5,9 @@ import os from "os";
 
 const { Pool } = pkg;
 
-// ----------------------------
+
 // 1️⃣ MariaDB Pool
-// ----------------------------
+
 const mariaPool = mariadb.createPool({
   host: process.env.MARIA_HOST || "18.218.110.222",
   user: process.env.MARIA_USER || "root",
@@ -16,9 +16,9 @@ const mariaPool = mariadb.createPool({
   connectionLimit: 5,
 });
 
-// ----------------------------
+
 // 2️⃣ PostgreSQL Pool — Docker-aware
-// ----------------------------
+
 function getPgHost() {
   if (process.env.PG_HOST) return process.env.PG_HOST;
   try {
@@ -40,15 +40,15 @@ const pgPool = new Pool({
   ssl: process.env.PG_SSL === "true" ? { rejectUnauthorized: false } : false,
 });
 
-// ----------------------------
+
 // 3️⃣ Sync Config
-// ----------------------------
+
 const FETCH_LIMIT = parseInt(process.env.FETCH_LIMIT || "500", 10);
 const INSERT_BATCH = parseInt(process.env.INSERT_BATCH || "500", 10);
 
-// ----------------------------
+
 // 4️⃣ Main sync function
-// ----------------------------
+
 export async function runMariaSync() {
   let conn;
   let totalInserted = 0;
@@ -188,9 +188,8 @@ export async function runMariaSync() {
   }
 }
 
-// ----------------------------
 // 5️⃣ Continuous loop
-// ----------------------------
+
 export async function startMariaSyncLoop(intervalMs = 60000) {
   while (true) {
     await runMariaSync();
@@ -198,9 +197,9 @@ export async function startMariaSyncLoop(intervalMs = 60000) {
   }
 }
 
-// ----------------------------
+
 // 6️⃣ Standalone run
-// ----------------------------
+
 if (require.main === module) {
   startMariaSyncLoop(Number(process.env.SYNC_INTERVAL || 60000))
     .catch(err => console.error("❌ Fatal sync loop error:", err));
