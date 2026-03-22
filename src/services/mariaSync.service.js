@@ -139,7 +139,8 @@ console.log(`✅ Matched devices: ${deviceMap.size}`);
              ON CONFLICT (device_id, servertime) DO NOTHING`,
             values
           );
-
+          
+          let totalInserted = 0;
           totalInserted += batch.length;
         }
 
