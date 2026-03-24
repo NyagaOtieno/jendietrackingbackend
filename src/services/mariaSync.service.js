@@ -1,10 +1,10 @@
 // src/services/mariaSync.service.js
+import dotenv from 'dotenv';
+dotenv.config();
 import { createPool } from "mariadb";  // fixed ESM import
 import { Pool } from "pg";
 import fs from "fs";
-import dotenv from "dotenv";
 
-dotenv.config();
 
 // =========================
 // 1️⃣ PostgreSQL Pool
