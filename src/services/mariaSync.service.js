@@ -98,104 +98,86 @@ export async function syncVehicles() {
 // =========================
 export async function syncTelemetry() {
   const conn = await mariaPool.getConnection();
-
   try {
-    // Load existing PostgreSQL devices into memory
-    const pgDevicesRes = await pgPool.query(
-      "SELECT id, uniqueid FROM devices"
-    );
-    const deviceMap = new Map(pgDevicesRes.rows.map(d => [d.uniqueid, d]));
+    // Fetch all vehicles from Postgres
+    const pgVehiclesRes = await pgPool.query("SELECT id, serial, plate_number FROM vehicles");
+    const vehicleMap = new Map(pgVehiclesRes.rows.map((v) => [v.serial, v]));
 
-    // STEP 1: Get all serials from registration
-    const registrations = await conn.query(`
-      SELECT serial FROM registration
-    `);
-
+    // Step 1: fetch all serials from registration
+    const registrations = await conn.query("SELECT serial FROM registration");
     for (const r of registrations) {
-      if (!r.serial) continue;
-
       const serialKey = `0${r.serial}`;
+      // Step 2: fetch device uniqueid
+      const devices = await conn.query("SELECT uniqueid FROM device WHERE uniqueid = ?", [serialKey]);
+      if (!devices.length) continue;
+      const uniqueId = devices[0].uniqueid;
 
-      // STEP 2: get uniqueid from device table in MariaDB
-      const deviceRows = await conn.query(
-        "SELECT id, uniqueid FROM device WHERE uniqueid = ?",
-        [serialKey]
+      // Step 3: fetch eventData for this uniqueId
+      const telemetryRows = await conn.query(
+        `SELECT latitude, longitude, speed, lastupdate, model, contact, category, attributes, phone, online, createdat
+         FROM eventData
+         WHERE uniqueid = ?
+         ORDER BY lastupdate ASC`,
+        [uniqueId]
       );
-      if (!deviceRows.length) continue;
+      if (!telemetryRows.length) continue;
 
-      const mariaDevice = deviceRows[0];
-      const uniqueId = mariaDevice.uniqueid;
-
-      // STEP 3: create device in PostgreSQL if it does NOT exist
-      let pgDevice = deviceMap.get(uniqueId);
-      if (!pgDevice) {
+      // Step 4: ensure vehicle exists in Postgres
+      let vehicle = vehicleMap.get(serialKey);
+      if (!vehicle) {
         const res = await pgPool.query(
-          `INSERT INTO devices (uniqueid)
-           VALUES ($1)
-           RETURNING id, uniqueid`,
-          [uniqueId]
+          `INSERT INTO vehicles (serial, unit_name, status, created_at)
+           VALUES ($1,$2,$3,$4)
+           RETURNING id, serial, plate_number`,
+          [serialKey, `Unit ${serialKey}`, "active", new Date()]
         );
-        pgDevice = res.rows[0];
-        deviceMap.set(uniqueId, pgDevice);
-        console.log(`➕ Created device ${uniqueId}`);
+        vehicle = res.rows[0];
+        vehicleMap.set(serialKey, vehicle);
+        console.log(`➕ Creating missing vehicle ${serialKey}`);
       }
 
-      // STEP 4: get last synced telemetry time
-      const lastRes = await pgPool.query(
-        "SELECT MAX(signal_time) AS lasttime FROM telemetry WHERE device_id=$1",
-        [pgDevice.id]
-      );
-      const lastTime = lastRes.rows[0].lasttime || "2000-01-01 00:00:00";
+      // Step 5: insert telemetry in batches
+      for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
+        const batch = telemetryRows.slice(i, i + INSERT_BATCH);
+        const values = [];
+        const placeholders = batch
+          .map((e, idx) => {
+            const off = idx * 12; // 12 columns now
+            values.push(
+              vehicle.id,
+              serialKey,
+              uniqueId,
+              e.latitude,
+              e.longitude,
+              e.speed || 0,
+              e.lastupdate,
+              e.model || null,
+              e.contact || null,
+              e.category || null,
+              e.attributes || null,
+              e.phone || null,
+              e.online || null,
+              e.createdat || new Date()
+            );
+            return `($${off + 1},$${off + 2},$${off + 3},$${off + 4},$${off + 5},$${off + 6},$${off + 7},$${off + 8},$${off + 9},$${off + 10},$${off + 11},$${off + 12},$${off + 13},$${off + 14})`;
+          })
+          .join(",");
 
-      // STEP 5: fetch telemetry from MariaDB in batches
-      let offset = 0;
-      while (true) {
-        const events = await conn.query(
-          `SELECT latitude, longitude, speed, servertime
-           FROM eventData
-           WHERE deviceid = ? AND servertime > ?
-           ORDER BY servertime ASC
-           LIMIT ? OFFSET ?`,
-          [mariaDevice.id, lastTime, FETCH_LIMIT, offset]
+        await pgPool.query(
+          `INSERT INTO telemetry
+           (device_id, serial, device_uniqueid, latitude, longitude, speed_kph, signal_time,
+            model, contact, category, attributes, phone, online, created_at)
+           VALUES ${placeholders}
+           ON CONFLICT (device_id, signal_time) DO NOTHING`,
+          values
         );
-        if (!events.length) break;
-
-        for (let i = 0; i < events.length; i += INSERT_BATCH) {
-          const batch = events.slice(i, i + INSERT_BATCH);
-
-          const values = [];
-          const placeholders = batch
-            .map((e, idx) => {
-              const off = idx * 5;
-              values.push(
-                pgDevice.id,
-                e.servertime,
-                e.latitude,
-                e.longitude,
-                e.speed || 0
-              );
-              return `($${off + 1},$${off + 2},$${off + 3},$${off + 4},$${off + 5})`;
-            })
-            .join(",");
-
-          await pgPool.query(
-            `INSERT INTO telemetry
-             (device_id, signal_time, latitude, longitude, speed)
-             VALUES ${placeholders}
-             ON CONFLICT DO NOTHING`,
-            values
-          );
-        }
-
-        offset += events.length;
-        console.log(`📦 Telemetry synced: ${uniqueId} - ${events.length}`);
       }
+      console.log(`📦 Telemetry synced: ${serialKey} - ${telemetryRows.length} rows`);
     }
   } finally {
     conn.release();
   }
 }
-
 // =========================
 // 6️⃣ Main Sync
 // =========================
