@@ -102,85 +102,100 @@ export async function syncTelemetry() {
   try {
     console.log("🔄 Starting telemetry sync using uniqueid...");
 
-    // Step 1: fetch all unique IDs from device table
-    const devices = await conn.query("SELECT uniqueid FROM device");
-    if (!devices.length) return;
+    // Step 1: fetch all serials from registration
+    const registrations = await conn.query("SELECT serial FROM registration");
 
-    for (const d of devices) {
-      const uniqueId = d.uniqueid;
-      if (!uniqueId) continue;
+    for (const r of registrations) {
+      const serialKey = `0${r.serial}`;
 
-      // Step 2: fetch telemetry data from eventData using uniqueid
+      // Step 2: fetch device info from device table using serialKey
+      const devices = await conn.query(
+        "SELECT id, uniqueid FROM device WHERE name = ?",
+        [serialKey]
+      );
+      if (!devices.length) continue;
+
+      const device = devices[0]; // device.id and device.uniqueid
+
+      // Step 3: fetch all eventData rows for this device
       const telemetryRows = await conn.query(
-        `SELECT 
-            uniqueid,
+        `SELECT
+            servertime,
+            devicetime,
+            fixtime,
+            valid,
             latitude,
             longitude,
+            altitude,
             speed,
-            lastupdate,
-            model,
-            contact,
-            category,
+            course,
+            address,
             attributes,
-            phone,
-            online,
-            createdat
+            accuracy,
+            network,
+            statuscode,
+            alarmcode,
+            speedlimit,
+            odometer,
+            isRead,
+            signalwireconnected,
+            powerwireconnected,
+            eactime
          FROM eventData
-         WHERE uniqueid = ?
-         ORDER BY lastupdate ASC`,
-        [uniqueId]
+         WHERE deviceid = ?
+         ORDER BY servertime ASC`,
+        [device.id]
       );
       if (!telemetryRows.length) continue;
 
-      // Step 3: insert telemetry in batches into Postgres
+      // Step 4: Insert into Postgres in batches
       for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
         const batch = telemetryRows.slice(i, i + INSERT_BATCH);
         const values = [];
         const placeholders = batch
           .map((e, idx) => {
-            const off = idx * 12; // 12 columns now
+            const off = idx * 22; // 22 columns for telemetry
             values.push(
-              e.uniqueid,
+              device.uniqueid,          // uniqueid
+              e.servertime,             // signal_time
+              e.devicetime,             // devicetime
+              e.fixtime,                // fixtime
+              e.valid,                  // valid
               e.latitude,
               e.longitude,
-              e.speed || 0,
-              e.lastupdate || new Date(),
-              e.model || null,
-              e.contact || null,
-              e.category || null,
-              e.attributes || null,
-              e.phone || null,
-              e.online || null,
-              e.createdat || new Date()
+              e.altitude,
+              e.speed,
+              e.course,
+              e.address,
+              e.attributes,
+              e.accuracy,
+              e.network,
+              e.statuscode,
+              e.alarmcode,
+              e.speedlimit,
+              e.odometer,
+              e.isRead,
+              e.signalwireconnected,
+              e.powerwireconnected,
+              e.eactime || new Date()   // created_at fallback
             );
-            return `($${off + 1},$${off + 2},$${off + 3},$${off + 4},$${off + 5},$${off + 6},$${off + 7},$${off + 8},$${off + 9},$${off + 10},$${off + 11},$${off + 12})`;
+            return `($${off + 1},$${off + 2},$${off + 3},$${off + 4},$${off + 5},$${off + 6},$${off + 7},$${off + 8},$${off + 9},$${off + 10},$${off + 11},$${off + 12},$${off + 13},$${off + 14},$${off + 15},$${off + 16},$${off + 17},$${off + 18},$${off + 19},$${off + 20},$${off + 21},$${off + 22})`;
           })
           .join(",");
 
         await pgPool.query(
           `INSERT INTO telemetry
-           (uniqueid, latitude, longitude, speed, signal_time,
-            model, contact, category, attributes, phone, online, created_at)
+            (uniqueid, signal_time, devicetime, fixtime, valid, latitude, longitude, altitude,
+             speed, course, address, attributes, accuracy, network, statuscode, alarmcode,
+             speedlimit, odometer, isread, signalwireconnected, powerwireconnected, created_at)
            VALUES ${placeholders}
-           ON CONFLICT (uniqueid, signal_time) DO UPDATE SET
-             latitude = EXCLUDED.latitude,
-             longitude = EXCLUDED.longitude,
-             speed = EXCLUDED.speed,
-             model = EXCLUDED.model,
-             contact = EXCLUDED.contact,
-             category = EXCLUDED.category,
-             attributes = EXCLUDED.attributes,
-             phone = EXCLUDED.phone,
-             online = EXCLUDED.online,
-             created_at = EXCLUDED.created_at`,
+           ON CONFLICT (uniqueid, signal_time) DO NOTHING`,
           values
         );
       }
-
-      console.log(`📦 Telemetry synced for uniqueid: ${uniqueId} - ${telemetryRows.length} rows`);
+      console.log(`📦 Telemetry synced for device ${device.uniqueid} - ${telemetryRows.length} rows`);
     }
 
-    console.log("✅ Telemetry sync completed");
   } finally {
     conn.release();
   }
