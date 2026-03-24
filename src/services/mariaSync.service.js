@@ -103,7 +103,7 @@ export async function syncVehicles() {
 export async function syncTelemetry() {
   const conn = await mariaPool.getConnection();
   try {
-    console.log("🔄 Starting telemetry sync using uniqueid...");
+    console.log("🔄 Starting telemetry sync using device.id...");
 
     // Step 0: Fetch all vehicles from Postgres to map serial -> id
     const pgVehiclesRes = await pgPool.query("SELECT id, serial, plate_number FROM vehicles");
@@ -114,12 +114,12 @@ export async function syncTelemetry() {
     for (const r of registrations) {
       const serialKey = `0${r.serial}`;
 
-      // Step 2: fetch device uniqueid from device table
-      const devices = await conn.query("SELECT uniqueid FROM device WHERE uniqueid = ?", [serialKey]);
+      // Step 2: fetch device id from device table using serial
+      const devices = await conn.query("SELECT id FROM device WHERE uniqueid = ?", [serialKey]);
       if (!devices.length) continue;
-      const uniqueId = devices[0].uniqueid;
+      const deviceId = devices[0].id; // <-- use this device.id for eventData
 
-      // Step 3: fetch full eventData for this uniqueId
+      // Step 3: fetch full eventData for this deviceId
       const telemetryRows = await conn.query(
         `SELECT
             deviceid,
@@ -147,7 +147,7 @@ export async function syncTelemetry() {
          FROM eventData
          WHERE deviceid = ?
          ORDER BY servertime ASC`,
-        [uniqueId]
+        [deviceId]
       );
       if (!telemetryRows.length) continue;
 
@@ -171,11 +171,11 @@ export async function syncTelemetry() {
         const values = [];
         const placeholders = batch
           .map((e, idx) => {
-            const off = idx * 22; // 22 columns in Postgres telemetry table now
+            const off = idx * 24; // 24 columns in Postgres telemetry table
             values.push(
-              vehicle.id,                 // device_id FK
-              serialKey,                  // serial
-              uniqueId,                   // uniqueid
+              vehicle.id,      // device_id FK in Postgres
+              serialKey,       // serial
+              deviceId,        // device.id instead of uniqueid
               e.latitude,
               e.longitude,
               e.speed || 0,
@@ -197,9 +197,9 @@ export async function syncTelemetry() {
               e.signalwireconnected ?? true,
               e.powerwireconnected ?? true,
               e.eactime || null,
-              new Date()                  // created_at
+              new Date() // created_at
             );
-            return `(${Array.from({ length: 24 }, (_, j) => `$${off + j + 1}`).join(",")})`;
+            return `(${Array.from({ length: 25 }, (_, j) => `$${off + j + 1}`).join(",")})`;
           })
           .join(",");
 
@@ -220,7 +220,6 @@ export async function syncTelemetry() {
     conn.release();
   }
 }
-
 // =========================
 // 6️⃣ Main Sync
 // =========================
