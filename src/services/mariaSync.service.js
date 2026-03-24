@@ -4,13 +4,14 @@ const mariadb = require('mariadb');
 const { Pool } = require('pg');
 const fs = require('fs');
 
+require('dotenv').config();
 // =========================
 // 1️⃣ MariaDB Pool
 // =========================
 const mariaPool = mariadb.createPool({
-  host: process.env.MARIA_HOST || '18.218.110.222',
-  user: process.env.MARIA_USER || 'root',
-  password: process.env.MARIA_PASSWORD || 'nairobiyetu',
+  host: process.env.MARIA_HOST,
+  user: process.env.MARIA_USER ,
+  password: process.env.MARIA_PASSWORD ,
   database: process.env.MARIA_DB || 'uradi',
   connectionLimit: 5,
 });
@@ -29,10 +30,10 @@ function getPgHost() {
 
 const pgPool = new Pool({
   host: getPgHost(),
-  port: Number(process.env.PG_PORT || 5432),
-  user: process.env.PG_USER || 'postgres',
-  password: process.env.PG_PASSWORD || 'postgres',
-  database: process.env.PG_DATABASE || 'tracking_platform',
+  port: Number(process.env.PG_PORT ),
+  user: process.env.PG_USER ,
+  password: process.env.PG_PASSWORD ,
+  database: process.env.PG_DATABASE ,
 });
 
 // =========================
