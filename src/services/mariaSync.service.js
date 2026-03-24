@@ -1,4 +1,4 @@
-import mariadb from "mariadb";
+import * as mariadb from "mariadb";
 import pkg from "pg";
 import fs from "fs";
 import dotenv from "dotenv";
