@@ -154,33 +154,33 @@ for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
   const values = [];
   const placeholders = batch
     .map((e, idx) => {
-      const off = idx * 23; // ✅ FIX: 23 columns, not 24
+    const off = idx * 23;
 
-      values.push(
-        deviceId,                  // 1
-        e.latitude,                // 2
-        e.longitude,               // 3
-        e.speed || 0,              // 4
-        e.servertime || new Date(),// 5
-        e.devicetime || null,      // 6
-        e.fixtime || null,         // 7
-        e.valid ?? true,           // 8
-        e.altitude || null,        // 9
-        e.course || null,          // 10
-        e.address || null,         // 11
-        e.attributes || null,      // 12
-        e.accuracy || null,        // 13
-        e.network || null,         // 14
-        e.statuscode ?? false,     // 15
-        e.alarmcode || null,       // 16
-        e.speedlimit || null,      // 17
-        e.odometer || null,        // 18
-        e.isRead ?? false,         // 19
-        e.signalwireconnected ?? true, // 20
-        e.powerwireconnected ?? true,  // 21
-        e.eactime || null,         // 22
-        new Date()                 // 23
-      );
+values.push(
+  deviceId,
+  e.protocol || null,
+  e.servertime || new Date(),
+  e.devicetime || null,
+  e.fixtime || null,
+  e.valid ?? true,
+  e.latitude,
+  e.longitude,
+  e.altitude || null,
+  e.speed || 0,
+  e.course || null,
+  e.address || null,
+  e.attributes || null,
+  e.accuracy || 0,
+  e.network || null,
+  e.statuscode ?? false,
+  e.alarmcode || null,
+  e.speedlimit || 80,
+  e.odometer || 0,
+  e.isRead ?? false,
+  e.signalwireconnected ?? true,
+  e.powerwireconnected ?? true,
+  e.eactime || null
+);
 
       return `(${Array.from({ length: 23 }, (_, j) => `$${off + j + 1}`).join(",")})`;
     })
