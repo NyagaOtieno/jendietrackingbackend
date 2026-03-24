@@ -1,14 +1,14 @@
 // src/services/mariaSync.service.js
-import { createPool } from "mariadb"; // ✅ use named import
+import { createPool } from "mariadb";  // fixed ESM import
 import { Pool } from "pg";
 import fs from "fs";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-// -------------------------
+// =========================
 // 1️⃣ PostgreSQL Pool
-// -------------------------
+// =========================
 function getPgHost() {
   if (process.env.PG_HOST) return process.env.PG_HOST;
   try {
@@ -26,121 +26,101 @@ export const pgPool = new Pool({
   database: process.env.PG_DATABASE,
 });
 
-// -------------------------
+// =========================
 // 2️⃣ MariaDB Pool
-// -------------------------
-let mariaPool = createPool({   // ✅ use createPool directly
+// =========================
+const mariaPool = createPool({
   host: process.env.MARIA_DB_HOST,
   port: Number(process.env.MARIA_DB_PORT || 3306),
   user: process.env.MARIA_DB_USER,
   password: process.env.MARIA_DB_PASSWORD,
   database: process.env.MARIA_DB_NAME || "uradi",
   connectionLimit: 5,
-  acquireTimeout: 10000,
+  acquireTimeout: 10000, // optional safety
 });
 
-// -------------------------
+// =========================
 // 3️⃣ Config
-// -------------------------
+// =========================
 const FETCH_LIMIT = parseInt(process.env.FETCH_LIMIT || "500", 10);
 const INSERT_BATCH = parseInt(process.env.INSERT_BATCH || "500", 10);
 const CRON_INTERVAL = parseInt(process.env.CRON_INTERVAL || "300000", 10);
 
-// -------------------------
+// =========================
 // 4️⃣ Vehicles Sync
-// -------------------------
+// =========================
 export async function syncVehicles() {
-  let conn;
+  const conn = await mariaPool.getConnection();
   try {
-    conn = await mariaPool.getConnection();
     const rows = await conn.query(`
       SELECT serial, reg_no, vmodel, dealer, install_date, pstatus
       FROM registration
     `);
-
     if (!rows.length) return;
 
     for (const r of rows) {
       const serialKey = r.serial ? `0${r.serial}` : null;
       if (!serialKey) continue;
 
-      try {
-        await pgPool.query(
-          `INSERT INTO vehicles
-            (serial, plate_number, unit_name, make, model, year, status, created_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-           ON CONFLICT (serial) DO UPDATE SET
-             plate_number = EXCLUDED.plate_number,
-             unit_name = EXCLUDED.unit_name,
-             make = EXCLUDED.make,
-             model = EXCLUDED.model,
-             year = EXCLUDED.year,
-             status = EXCLUDED.status,
-             created_at = EXCLUDED.created_at`,
-          [
-            serialKey,
-            r.reg_no || "",
-            `Unit ${serialKey}`,
-            null,
-            r.vmodel || "",
-            null,
-            r.pstatus || "inactive",
-            r.install_date || new Date(),
-          ]
-        );
-      } catch (err) {
-        console.error(`⚠️ Failed vehicle sync for ${serialKey}:`, err.message);
-      }
+      await pgPool.query(
+        `INSERT INTO vehicles
+          (serial, plate_number, unit_name, make, model, year, status, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (serial) DO UPDATE SET
+           plate_number = EXCLUDED.plate_number,
+           unit_name = EXCLUDED.unit_name,
+           make = EXCLUDED.make,
+           model = EXCLUDED.model,
+           year = EXCLUDED.year,
+           status = EXCLUDED.status,
+           created_at = EXCLUDED.created_at`,
+        [
+          serialKey,
+          r.reg_no || "",
+          `Unit ${serialKey}`,
+          null,
+          r.vmodel || "",
+          null,
+          r.pstatus || "inactive",
+          r.install_date || new Date(),
+        ]
+      );
     }
-
-    console.log(`✅ Vehicles synced: ${rows.length}`);
-  } catch (err) {
-    console.error("❌ Vehicles sync failed:", err.message);
+    console.log(`Vehicles synced: ${rows.length}`);
   } finally {
-    if (conn) conn.release();
+    conn.release();
   }
 }
 
-// -------------------------
+// =========================
 // 5️⃣ Telemetry Sync
-// -------------------------
+// =========================
 export async function syncTelemetry() {
-  let conn;
+  const conn = await mariaPool.getConnection();
   try {
-    conn = await mariaPool.getConnection();
-
-    const pgVehiclesRes = await pgPool.query(
-      "SELECT id, serial, plate_number FROM vehicles"
-    );
+    const pgVehiclesRes = await pgPool.query("SELECT id, serial, plate_number FROM vehicles");
     const vehicleMap = new Map(pgVehiclesRes.rows.map((v) => [v.serial, v]));
 
-    const devices = await conn.query(
-      "SELECT id, uniqueid, imei, simno, protocol FROM device"
-    );
+    const devices = await conn.query("SELECT id, uniqueid, imei, simno, protocol FROM device");
 
     for (const d of devices) {
       const serialKey = d.uniqueid.startsWith("0") ? d.uniqueid : `0${d.uniqueid}`;
       let vehicle = vehicleMap.get(serialKey);
 
       if (!vehicle) {
-        try {
-          const res = await pgPool.query(
-            `INSERT INTO vehicles (serial, unit_name, status, created_at)
-             VALUES ($1,$2,$3,$4)
-             RETURNING id, serial, plate_number`,
-            [serialKey, `Unit ${serialKey}`, "active", new Date()]
-          );
-          vehicle = res.rows[0];
-          vehicleMap.set(serialKey, vehicle);
-          console.log(`➕ Created missing vehicle ${serialKey}`);
-        } catch (err) {
-          console.error(`⚠️ Failed creating vehicle ${serialKey}:`, err.message);
-          continue;
-        }
+        const res = await pgPool.query(
+          `INSERT INTO vehicles (serial, unit_name, status, created_at)
+           VALUES ($1,$2,$3,$4)
+           RETURNING id, serial, plate_number`,
+          [serialKey, `Unit ${serialKey}`, "active", new Date()]
+        );
+        vehicle = res.rows[0];
+        vehicleMap.set(serialKey, vehicle);
+        console.log(`➕ Creating missing vehicle ${serialKey}`);
       }
 
       const lastRes = await pgPool.query(
-        "SELECT MAX(device_time) AS lasttime FROM telemetry WHERE vehicle_id=$1",
+        "SELECT MAX(signal_time) AS lasttime FROM telemetry WHERE vehicle_id=$1",
         [vehicle.id]
       );
       const lastTime = lastRes.rows[0].lasttime || "2000-01-01 00:00:00";
@@ -184,42 +164,30 @@ export async function syncTelemetry() {
             VALUES ${placeholders}
             ON CONFLICT (vehicle_id, device_time) DO NOTHING
           `;
-
-          try {
-            await pgPool.query(query, values);
-          } catch (err) {
-            console.error(`⚠️ Telemetry insert failed for vehicle ${vehicle.serial}:`, err.message);
-          }
+          await pgPool.query(query, values);
         }
-
         console.log(`📦 Telemetry synced: ${vehicle.serial} - ${events.length} rows`);
         offset += events.length;
       }
     }
-  } catch (err) {
-    console.error("❌ Telemetry sync failed:", err.message);
   } finally {
-    if (conn) conn.release();
+    conn.release();
   }
 }
 
-// -------------------------
+// =========================
 // 6️⃣ Main Sync
-// -------------------------
+// =========================
 export async function runMariaSync() {
   console.log("🚀 Production Maria Sync Started");
-  try {
-    await syncVehicles();
-    await syncTelemetry();
-    console.log("✅ Maria Sync completed");
-  } catch (err) {
-    console.error("❌ Maria Sync run failed:", err.message);
-  }
+  await syncVehicles();
+  await syncTelemetry();
+  console.log("✅ Maria Sync completed");
 }
 
-// -------------------------
+// =========================
 // 7️⃣ Cron
-// -------------------------
+// =========================
 export function startMariaSyncCron(interval = CRON_INTERVAL) {
   runMariaSync().catch(console.error);
   setInterval(() => runMariaSync().catch(console.error), interval);
