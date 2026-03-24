@@ -1,17 +1,18 @@
-// src/services/mariaSync.service.js
+import mariadb from "mariadb";
+import pkg from "pg";
+import fs from "fs";
+import dotenv from "dotenv";
 
-const mariadb = require('mariadb');
-const { Pool } = require('pg');
-const fs = require('fs');
+dotenv.config();
+const { Pool } = pkg;
 
-require('dotenv').config();
 // =========================
 // 1️⃣ MariaDB Pool
 // =========================
-const mariaPool = mariadb.createPool({
+export const mariaPool = mariadb.createPool({
   host: process.env.MARIA_HOST,
-  user: process.env.MARIA_USER ,
-  password: process.env.MARIA_PASSWORD ,
+  user: process.env.MARIA_USER,
+  password: process.env.MARIA_PASSWORD,
   database: process.env.MARIA_DB || 'uradi',
   connectionLimit: 5,
 });
@@ -28,12 +29,12 @@ function getPgHost() {
   return '127.0.0.1';
 }
 
-const pgPool = new Pool({
+export const pgPool = new Pool({
   host: getPgHost(),
-  port: Number(process.env.PG_PORT ),
-  user: process.env.PG_USER ,
-  password: process.env.PG_PASSWORD ,
-  database: process.env.PG_DATABASE ,
+  port: Number(process.env.PG_PORT),
+  user: process.env.PG_USER,
+  password: process.env.PG_PASSWORD,
+  database: process.env.PG_DATABASE,
 });
 
 // =========================
@@ -46,19 +47,18 @@ const CRON_INTERVAL = parseInt(process.env.CRON_INTERVAL || '300000', 10);
 // =========================
 // 4️⃣ Vehicles Sync
 // =========================
-async function syncVehicles() {
+export async function syncVehicles() {
   const conn = await mariaPool.getConnection();
   try {
     const rows = await conn.query(`
       SELECT serial, reg_no, vmodel, dealer, install_date, pstatus
       FROM registration
     `);
-
     if (!rows.length) return;
 
     for (const r of rows) {
       const serialKey = r.serial ? `0${r.serial}` : null;
-      if (!serialKey) continue; // skip if no serial
+      if (!serialKey) continue;
 
       await pgPool.query(
         `INSERT INTO vehicles
@@ -84,7 +84,6 @@ async function syncVehicles() {
         ]
       );
     }
-
     console.log(`Vehicles synced: ${rows.length}`);
   } finally {
     conn.release();
@@ -94,7 +93,7 @@ async function syncVehicles() {
 // =========================
 // 5️⃣ Telemetry Sync
 // =========================
-async function syncTelemetry() {
+export async function syncTelemetry() {
   const conn = await mariaPool.getConnection();
   try {
     const pgVehiclesRes = await pgPool.query('SELECT id, serial, plate_number FROM vehicles');
@@ -163,7 +162,6 @@ async function syncTelemetry() {
           `;
           await pgPool.query(query, values);
         }
-
         console.log(`📦 Telemetry synced: ${vehicle.serial} - ${events.length} rows`);
         offset += events.length;
       }
@@ -176,7 +174,7 @@ async function syncTelemetry() {
 // =========================
 // 6️⃣ Main Sync
 // =========================
-async function runMariaSync() {
+export async function runMariaSync() {
   console.log('🚀 Production Maria Sync Started');
   await syncVehicles();
   await syncTelemetry();
@@ -186,19 +184,7 @@ async function runMariaSync() {
 // =========================
 // 7️⃣ Cron
 // =========================
-function startMariaSyncCron(interval = CRON_INTERVAL) {
+export function startMariaSyncCron(interval = CRON_INTERVAL) {
   runMariaSync().catch(console.error);
   setInterval(() => runMariaSync().catch(console.error), interval);
 }
-
-// =========================
-// 8️⃣ Export
-// =========================
-module.exports = {
-  syncVehicles,
-  syncTelemetry,
-  runMariaSync,
-  startMariaSyncCron,
-  mariaPool,
-  pgPool,
-};
