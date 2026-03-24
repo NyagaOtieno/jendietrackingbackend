@@ -148,38 +148,40 @@ export async function syncTelemetry() {
       );
       if (!telemetryRows.length) continue;
 
-      // Step 4: insert telemetry in batches (FK removed, insert directly)
+      // Step 5: insert telemetry in batches (FIXED placeholders mismatch)
 for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
   const batch = telemetryRows.slice(i, i + INSERT_BATCH);
   const values = [];
   const placeholders = batch
     .map((e, idx) => {
-      const off = idx * 24; // 24 columns total
+      const off = idx * 23; // ✅ FIX: 23 columns, not 24
+
       values.push(
-        deviceId,          // device_id (MariaDB device.id, FK no longer enforced)
-        e.latitude,
-        e.longitude,
-        e.speed || 0,
-        e.servertime || new Date(), // signal_time
-        e.devicetime || null,
-        e.fixtime || null,
-        e.valid ?? true,
-        e.altitude || null,
-        e.course || null,
-        e.address || null,
-        e.attributes || null,
-        e.accuracy || null,
-        e.network || null,
-        e.statuscode ?? false,
-        e.alarmcode || null,
-        e.speedlimit || null,
-        e.odometer || null,
-        e.isRead ?? false,
-        e.signalwireconnected ?? true,
-        e.powerwireconnected ?? true,
-        e.eactime || null,
-        new Date()          // created_at
+        deviceId,                  // 1
+        e.latitude,                // 2
+        e.longitude,               // 3
+        e.speed || 0,              // 4
+        e.servertime || new Date(),// 5
+        e.devicetime || null,      // 6
+        e.fixtime || null,         // 7
+        e.valid ?? true,           // 8
+        e.altitude || null,        // 9
+        e.course || null,          // 10
+        e.address || null,         // 11
+        e.attributes || null,      // 12
+        e.accuracy || null,        // 13
+        e.network || null,         // 14
+        e.statuscode ?? false,     // 15
+        e.alarmcode || null,       // 16
+        e.speedlimit || null,      // 17
+        e.odometer || null,        // 18
+        e.isRead ?? false,         // 19
+        e.signalwireconnected ?? true, // 20
+        e.powerwireconnected ?? true,  // 21
+        e.eactime || null,         // 22
+        new Date()                 // 23
       );
+
       return `(${Array.from({ length: 23 }, (_, j) => `$${off + j + 1}`).join(",")})`;
     })
     .join(",");
@@ -194,7 +196,6 @@ for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
     values
   );
 }
-
       console.log(`📦 Telemetry synced: ${serialKey} - ${telemetryRows.length} rows`);
     }
   } finally {
