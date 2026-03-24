@@ -97,29 +97,32 @@ export async function syncVehicles() {
 // 5️⃣ Telemetry Sync (FIXED FLOW)
 // =========================
 
+// =========================
+// 5️⃣ Telemetry Sync (Full Columns)
+// =========================
 export async function syncTelemetry() {
   const conn = await mariaPool.getConnection();
   try {
     console.log("🔄 Starting telemetry sync using uniqueid...");
 
+    // Step 0: Fetch all vehicles from Postgres to map serial -> id
+    const pgVehiclesRes = await pgPool.query("SELECT id, serial, plate_number FROM vehicles");
+    const vehicleMap = new Map(pgVehiclesRes.rows.map((v) => [v.serial, v]));
+
     // Step 1: fetch all serials from registration
     const registrations = await conn.query("SELECT serial FROM registration");
-
     for (const r of registrations) {
       const serialKey = `0${r.serial}`;
 
-      // Step 2: fetch device info from device table using serialKey
-      const devices = await conn.query(
-        "SELECT id, uniqueid FROM device WHERE name = ?",
-        [serialKey]
-      );
+      // Step 2: fetch device uniqueid from device table
+      const devices = await conn.query("SELECT uniqueid FROM device WHERE uniqueid = ?", [serialKey]);
       if (!devices.length) continue;
+      const uniqueId = devices[0].uniqueid;
 
-      const device = devices[0]; // device.id and device.uniqueid
-
-      // Step 3: fetch all eventData rows for this device
+      // Step 3: fetch full eventData for this uniqueId
       const telemetryRows = await conn.query(
         `SELECT
+            deviceid,
             servertime,
             devicetime,
             fixtime,
@@ -144,58 +147,75 @@ export async function syncTelemetry() {
          FROM eventData
          WHERE deviceid = ?
          ORDER BY servertime ASC`,
-        [device.id]
+        [uniqueId]
       );
       if (!telemetryRows.length) continue;
 
-      // Step 4: Insert into Postgres in batches
+      // Step 4: ensure vehicle exists in Postgres
+      let vehicle = vehicleMap.get(serialKey);
+      if (!vehicle) {
+        const res = await pgPool.query(
+          `INSERT INTO vehicles (serial, unit_name, status, created_at)
+           VALUES ($1,$2,$3,$4)
+           RETURNING id, serial, plate_number`,
+          [serialKey, `Unit ${serialKey}`, "active", new Date()]
+        );
+        vehicle = res.rows[0];
+        vehicleMap.set(serialKey, vehicle);
+        console.log(`➕ Creating missing vehicle ${serialKey}`);
+      }
+
+      // Step 5: insert telemetry in batches
       for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
         const batch = telemetryRows.slice(i, i + INSERT_BATCH);
         const values = [];
         const placeholders = batch
           .map((e, idx) => {
-            const off = idx * 22; // 22 columns for telemetry
+            const off = idx * 22; // 22 columns in Postgres telemetry table now
             values.push(
-              device.uniqueid,          // uniqueid
-              e.servertime,             // signal_time
-              e.devicetime,             // devicetime
-              e.fixtime,                // fixtime
-              e.valid,                  // valid
+              vehicle.id,                 // device_id FK
+              serialKey,                  // serial
+              uniqueId,                   // uniqueid
               e.latitude,
               e.longitude,
-              e.altitude,
-              e.speed,
-              e.course,
-              e.address,
-              e.attributes,
-              e.accuracy,
-              e.network,
-              e.statuscode,
-              e.alarmcode,
-              e.speedlimit,
-              e.odometer,
-              e.isRead,
-              e.signalwireconnected,
-              e.powerwireconnected,
-              e.eactime || new Date()   // created_at fallback
+              e.speed || 0,
+              e.servertime || new Date(), // signal_time
+              e.devicetime || null,
+              e.fixtime || null,
+              e.valid ?? true,
+              e.altitude || null,
+              e.course || null,
+              e.address || null,
+              e.attributes || null,
+              e.accuracy || null,
+              e.network || null,
+              e.statuscode ?? false,
+              e.alarmcode || null,
+              e.speedlimit || null,
+              e.odometer || null,
+              e.isRead ?? false,
+              e.signalwireconnected ?? true,
+              e.powerwireconnected ?? true,
+              e.eactime || null,
+              new Date()                  // created_at
             );
-            return `($${off + 1},$${off + 2},$${off + 3},$${off + 4},$${off + 5},$${off + 6},$${off + 7},$${off + 8},$${off + 9},$${off + 10},$${off + 11},$${off + 12},$${off + 13},$${off + 14},$${off + 15},$${off + 16},$${off + 17},$${off + 18},$${off + 19},$${off + 20},$${off + 21},$${off + 22})`;
+            return `(${Array.from({ length: 24 }, (_, j) => `$${off + j + 1}`).join(",")})`;
           })
           .join(",");
 
         await pgPool.query(
           `INSERT INTO telemetry
-            (uniqueid, signal_time, devicetime, fixtime, valid, latitude, longitude, altitude,
-             speed, course, address, attributes, accuracy, network, statuscode, alarmcode,
-             speedlimit, odometer, isread, signalwireconnected, powerwireconnected, created_at)
+            (device_id, serial, uniqueid, latitude, longitude, speed, signal_time,
+             devicetime, fixtime, valid, altitude, course, address, attributes, accuracy,
+             network, statuscode, alarmcode, speedlimit, odometer, isread,
+             signalwireconnected, powerwireconnected, eactime, created_at)
            VALUES ${placeholders}
-           ON CONFLICT (uniqueid, signal_time) DO NOTHING`,
+           ON CONFLICT (device_id, signal_time) DO NOTHING`,
           values
         );
       }
-      console.log(`📦 Telemetry synced for device ${device.uniqueid} - ${telemetryRows.length} rows`);
+      console.log(`📦 Telemetry synced: ${serialKey} - ${telemetryRows.length} rows`);
     }
-
   } finally {
     conn.release();
   }
