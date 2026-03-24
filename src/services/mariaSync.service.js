@@ -86,7 +86,6 @@ export async function syncVehicles() {
     r.install_date || new Date(),
   ]
 );
-
     console.log(`Vehicles synced: ${rows.length}`);
   } finally {
     conn.release();
@@ -128,10 +127,10 @@ export async function syncTelemetry() {
       }
 
       // Fetch last telemetry time for this vehicle
-      const lastRes = await pgPool.query(
-        'SELECT MAX(device_time) AS lasttime FROM telemetry WHERE vehicle_id=$1',
-        [vehicle.id]
-      );
+     const lastRes = await pgPool.query(
+  'SELECT MAX(signal_time) AS lasttime FROM telemetry WHERE vehicle_id=$1',
+  [vehicle.id]
+);
       const lastTime = lastRes.rows[0].lasttime || '2000-01-01 00:00:00';
 
       // Fetch events from MariaDB
