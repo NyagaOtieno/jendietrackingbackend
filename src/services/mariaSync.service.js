@@ -148,53 +148,52 @@ export async function syncTelemetry() {
       );
       if (!telemetryRows.length) continue;
 
-      // Step 4: insert telemetry into Postgres telemetry table
-      for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
-        const batch = telemetryRows.slice(i, i + INSERT_BATCH);
-        const values = [];
-        const placeholders = batch
-          .map((e, idx) => {
-            const off = idx * 23; // 23 columns total
-            values.push(
-              deviceId,               // device_id from MariaDB
-              e.latitude,
-              e.longitude,
-              e.speed || 0,
-              e.servertime || new Date(),
-              e.devicetime || null,
-              e.fixtime || null,
-              e.valid ?? true,
-              e.altitude || null,
-              e.course || null,
-              e.address || null,
-              e.attributes || null,
-              e.accuracy || null,
-              e.network || null,
-              e.statuscode ?? false,
-              e.alarmcode || null,
-              e.speedlimit || null,
-              e.odometer || null,
-              e.isRead ?? false,
-              e.signalwireconnected ?? true,
-              e.powerwireconnected ?? true,
-              e.eactime || null,
-              new Date()
-            );
-            return `(${Array.from({ length: 23 }, (_, j) => `$${off + j + 1}`).join(",")})`;
-          })
-          .join(",");
+      // Step 4: insert telemetry in batches (FK removed, insert directly)
+for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
+  const batch = telemetryRows.slice(i, i + INSERT_BATCH);
+  const values = [];
+  const placeholders = batch
+    .map((e, idx) => {
+      const off = idx * 24; // 24 columns total
+      values.push(
+        deviceId,          // device_id (MariaDB device.id, FK no longer enforced)
+        e.latitude,
+        e.longitude,
+        e.speed || 0,
+        e.servertime || new Date(), // signal_time
+        e.devicetime || null,
+        e.fixtime || null,
+        e.valid ?? true,
+        e.altitude || null,
+        e.course || null,
+        e.address || null,
+        e.attributes || null,
+        e.accuracy || null,
+        e.network || null,
+        e.statuscode ?? false,
+        e.alarmcode || null,
+        e.speedlimit || null,
+        e.odometer || null,
+        e.isRead ?? false,
+        e.signalwireconnected ?? true,
+        e.powerwireconnected ?? true,
+        e.eactime || null,
+        new Date()          // created_at
+      );
+      return `(${Array.from({ length: 23 }, (_, j) => `$${off + j + 1}`).join(",")})`;
+    })
+    .join(",");
 
-        await pgPool.query(
-          `INSERT INTO telemetry
-            (device_id, latitude, longitude, speed, signal_time,
-             devicetime, fixtime, valid, altitude, course, address, attributes,
-             accuracy, network, statuscode, alarmcode, speedlimit, odometer, isread,
-             signalwireconnected, powerwireconnected, eactime, created_at)
-           VALUES ${placeholders}
-           ON CONFLICT (device_id, signal_time) DO NOTHING`,
-          values
-        );
-      }
+  await pgPool.query(
+    `INSERT INTO telemetry
+      (device_id, latitude, longitude, speed, signal_time,
+       devicetime, fixtime, valid, altitude, course, address, attributes,
+       accuracy, network, statuscode, alarmcode, speedlimit, odometer,
+       isread, signalwireconnected, powerwireconnected, eactime, created_at)
+     VALUES ${placeholders}`,
+    values
+  );
+}
 
       console.log(`📦 Telemetry synced: ${serialKey} - ${telemetryRows.length} rows`);
     }
