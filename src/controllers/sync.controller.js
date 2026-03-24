@@ -4,12 +4,11 @@ export async function triggerMariaSync(_req, res) {
   try {
     console.log("triggerMariaSync hit");
 
-    const result = await runMariaSync();
+    await runMariaSync();
 
     return res.status(200).json({
       success: true,
       message: "Maria sync completed",
-      data: result,
     });
   } catch (error) {
     console.error("Maria sync failed:", error);
