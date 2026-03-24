@@ -63,33 +63,35 @@ export async function syncVehicles() {
 
     if (!rows.length) return;
 
+  for (const r of rows) {
+  // ✅ Define serialKey first
+  const serialKey = r.serial ? `0${r.serial}` : null;
+
+  if (!serialKey) continue; // skip if no serial
+
   await pgPool.query(
-  `INSERT INTO vehicles
-    (serial, plate_number, unit_name, make, model, year, status, created_at)
-   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-   ON CONFLICT (serial) DO UPDATE SET
-     plate_number = EXCLUDED.plate_number,
-     unit_name = EXCLUDED.unit_name,
-     make = EXCLUDED.make,
-     model = EXCLUDED.model,
-     year = EXCLUDED.year,
-     status = EXCLUDED.status,
-     created_at = EXCLUDED.created_at`,
-  [
-    serialKey,
-    r.reg_no || '',
-    `Unit ${serialKey}`,
-    null,
-    r.vmodel || '',
-    null,
-    r.pstatus || 'inactive',
-    r.install_date || new Date(),
-  ]
-);
-    console.log(`Vehicles synced: ${rows.length}`);
-  } finally {
-    conn.release();
-  }
+    `INSERT INTO vehicles
+      (serial, plate_number, unit_name, make, model, year, status, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (serial) DO UPDATE SET
+       plate_number = EXCLUDED.plate_number,
+       unit_name = EXCLUDED.unit_name,
+       make = EXCLUDED.make,
+       model = EXCLUDED.model,
+       year = EXCLUDED.year,
+       status = EXCLUDED.status,
+       created_at = EXCLUDED.created_at`,
+    [
+      serialKey,
+      r.reg_no || '',
+      `Unit ${serialKey}`,
+      null,
+      r.vmodel || '',
+      null,
+      r.pstatus || 'inactive',
+      r.install_date || new Date(),
+    ]
+  );
 }
 
 // =========================
