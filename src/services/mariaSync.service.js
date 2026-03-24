@@ -1,10 +1,8 @@
 // src/services/mariaSync.service.js
 
-import * as mariadb from 'mariadb';
-import pkg from 'pg';
-import fs from 'fs';
-
-const { Pool } = pkg;
+const mariadb = require('mariadb');
+const { Pool } = require('pg');
+const fs = require('fs');
 
 // =========================
 // 1️⃣ MariaDB Pool
@@ -47,75 +45,66 @@ const CRON_INTERVAL = parseInt(process.env.CRON_INTERVAL || '300000', 10);
 // =========================
 // 4️⃣ Vehicles Sync
 // =========================
-export async function syncVehicles() {
+async function syncVehicles() {
   const conn = await mariaPool.getConnection();
   try {
     const rows = await conn.query(`
-      SELECT
-        serial,
-        reg_no,
-        vmodel,
-        dealer,
-        install_date,
-        pstatus
+      SELECT serial, reg_no, vmodel, dealer, install_date, pstatus
       FROM registration
     `);
 
     if (!rows.length) return;
 
-  for (const r of rows) {
-  // ✅ Define serialKey first
-  const serialKey = r.serial ? `0${r.serial}` : null;
+    for (const r of rows) {
+      const serialKey = r.serial ? `0${r.serial}` : null;
+      if (!serialKey) continue; // skip if no serial
 
-  if (!serialKey) continue; // skip if no serial
+      await pgPool.query(
+        `INSERT INTO vehicles
+          (serial, plate_number, unit_name, make, model, year, status, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (serial) DO UPDATE SET
+           plate_number = EXCLUDED.plate_number,
+           unit_name = EXCLUDED.unit_name,
+           make = EXCLUDED.make,
+           model = EXCLUDED.model,
+           year = EXCLUDED.year,
+           status = EXCLUDED.status,
+           created_at = EXCLUDED.created_at`,
+        [
+          serialKey,
+          r.reg_no || '',
+          `Unit ${serialKey}`,
+          null,
+          r.vmodel || '',
+          null,
+          r.pstatus || 'inactive',
+          r.install_date || new Date(),
+        ]
+      );
+    }
 
-  await pgPool.query(
-    `INSERT INTO vehicles
-      (serial, plate_number, unit_name, make, model, year, status, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-     ON CONFLICT (serial) DO UPDATE SET
-       plate_number = EXCLUDED.plate_number,
-       unit_name = EXCLUDED.unit_name,
-       make = EXCLUDED.make,
-       model = EXCLUDED.model,
-       year = EXCLUDED.year,
-       status = EXCLUDED.status,
-       created_at = EXCLUDED.created_at`,
-    [
-      serialKey,
-      r.reg_no || '',
-      `Unit ${serialKey}`,
-      null,
-      r.vmodel || '',
-      null,
-      r.pstatus || 'inactive',
-      r.install_date || new Date(),
-    ]
-  );
+    console.log(`Vehicles synced: ${rows.length}`);
+  } finally {
+    conn.release();
+  }
 }
 
 // =========================
 // 5️⃣ Telemetry Sync
 // =========================
-export async function syncTelemetry() {
+async function syncTelemetry() {
   const conn = await mariaPool.getConnection();
   try {
-    // Load vehicles from PG
-    const pgVehiclesRes = await pgPool.query(
-      'SELECT id, serial, plate_number FROM vehicles'
-    );
+    const pgVehiclesRes = await pgPool.query('SELECT id, serial, plate_number FROM vehicles');
     const vehicleMap = new Map(pgVehiclesRes.rows.map(v => [v.serial, v]));
 
-    // Load devices from MariaDB
-    const devices = await conn.query(
-      'SELECT id, uniqueid, imei, simno, protocol FROM device'
-    );
+    const devices = await conn.query('SELECT id, uniqueid, imei, simno, protocol FROM device');
 
     for (const d of devices) {
       const serialKey = d.uniqueid.startsWith('0') ? d.uniqueid : `0${d.uniqueid}`;
       let vehicle = vehicleMap.get(serialKey);
 
-      // If vehicle missing, create it automatically
       if (!vehicle) {
         const res = await pgPool.query(
           `INSERT INTO vehicles (serial, unit_name, status, created_at)
@@ -128,14 +117,12 @@ export async function syncTelemetry() {
         console.log(`➕ Creating missing vehicle ${serialKey}`);
       }
 
-      // Fetch last telemetry time for this vehicle
-     const lastRes = await pgPool.query(
-  'SELECT MAX(signal_time) AS lasttime FROM telemetry WHERE vehicle_id=$1',
-  [vehicle.id]
-);
+      const lastRes = await pgPool.query(
+        'SELECT MAX(signal_time) AS lasttime FROM telemetry WHERE vehicle_id=$1',
+        [vehicle.id]
+      );
       const lastTime = lastRes.rows[0].lasttime || '2000-01-01 00:00:00';
 
-      // Fetch events from MariaDB
       let offset = 0;
       while (true) {
         const events = await conn.query(
@@ -148,7 +135,6 @@ export async function syncTelemetry() {
         );
         if (!events.length) break;
 
-        // Insert telemetry into PG
         for (let i = 0; i < events.length; i += INSERT_BATCH) {
           const batch = events.slice(i, i + INSERT_BATCH);
           const values = [];
@@ -189,7 +175,7 @@ export async function syncTelemetry() {
 // =========================
 // 6️⃣ Main Sync
 // =========================
-export async function runMariaSync() {
+async function runMariaSync() {
   console.log('🚀 Production Maria Sync Started');
   await syncVehicles();
   await syncTelemetry();
@@ -199,7 +185,19 @@ export async function runMariaSync() {
 // =========================
 // 7️⃣ Cron
 // =========================
-export function startMariaSyncCron(interval = CRON_INTERVAL) {
+function startMariaSyncCron(interval = CRON_INTERVAL) {
   runMariaSync().catch(console.error);
   setInterval(() => runMariaSync().catch(console.error), interval);
 }
+
+// =========================
+// 8️⃣ Export
+// =========================
+module.exports = {
+  syncVehicles,
+  syncTelemetry,
+  runMariaSync,
+  startMariaSyncCron,
+  mariaPool,
+  pgPool,
+};
