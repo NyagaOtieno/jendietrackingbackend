@@ -1,7 +1,7 @@
-
-import { runMariaSync } from "../services/mariaSync.service.js";
 import dotenv from 'dotenv';
 dotenv.config();
+import { runMariaSync } from "../services/mariaSync.service.js";
+
 async function testSync() {
   console.log("Starting manual Maria sync test...");
   
