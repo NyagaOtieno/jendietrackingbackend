@@ -96,6 +96,9 @@ export async function syncVehicles() {
 // =========================
 // 5️⃣ Telemetry Sync (FIXED FLOW)
 // =========================
+// =========================
+// 5️⃣ Telemetry Sync (improved uniqueid logic)
+// =========================
 export async function syncTelemetry() {
   const conn = await mariaPool.getConnection();
   try {
@@ -107,7 +110,8 @@ export async function syncTelemetry() {
     const registrations = await conn.query("SELECT serial FROM registration");
     for (const r of registrations) {
       const serialKey = `0${r.serial}`;
-      // Step 2: fetch device uniqueid
+      
+      // Step 2: fetch device uniqueid from device table
       const devices = await conn.query("SELECT uniqueid FROM device WHERE uniqueid = ?", [serialKey]);
       if (!devices.length) continue;
       const uniqueId = devices[0].uniqueid;
@@ -142,11 +146,11 @@ export async function syncTelemetry() {
         const values = [];
         const placeholders = batch
           .map((e, idx) => {
-            const off = idx * 12; // 12 columns now
+            const off = idx * 14; // 14 columns now
             values.push(
-              vehicle.id,
-              serialKey,
-              uniqueId,
+              vehicle.id,         // device_id (FK)
+              serialKey,          // serial
+              uniqueId,           // device_uniqueid
               e.latitude,
               e.longitude,
               e.speed || 0,
@@ -178,6 +182,7 @@ export async function syncTelemetry() {
     conn.release();
   }
 }
+
 // =========================
 // 6️⃣ Main Sync
 // =========================
