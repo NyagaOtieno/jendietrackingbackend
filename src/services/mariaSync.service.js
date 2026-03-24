@@ -100,56 +100,55 @@ export async function syncTelemetry() {
   const conn = await mariaPool.getConnection();
 
   try {
-    const pgVehiclesRes = await pgPool.query("SELECT id, serial FROM vehicles");
-    const vehicleMap = new Map(pgVehiclesRes.rows.map(v => [v.serial, v]));
+    // Load existing PostgreSQL devices into memory
+    const pgDevicesRes = await pgPool.query(
+      "SELECT id, uniqueid FROM devices"
+    );
+    const deviceMap = new Map(pgDevicesRes.rows.map(d => [d.uniqueid, d]));
 
-    // ✅ STEP 1: Start from registration (correct)
+    // STEP 1: Get all serials from registration
     const registrations = await conn.query(`
-      SELECT serial, reg_no
-      FROM registration
+      SELECT serial FROM registration
     `);
 
     for (const r of registrations) {
+      if (!r.serial) continue;
+
       const serialKey = `0${r.serial}`;
 
-      // ✅ STEP 2: map to device using uniqueid
-      const device = await conn.query(
+      // STEP 2: get uniqueid from device table in MariaDB
+      const deviceRows = await conn.query(
         "SELECT id, uniqueid FROM device WHERE uniqueid = ?",
         [serialKey]
       );
+      if (!deviceRows.length) continue;
 
-      if (!device.length) {
-        console.log(`⚠️ No device for serial ${r.serial}`);
-        continue;
-      }
+      const mariaDevice = deviceRows[0];
+      const uniqueId = mariaDevice.uniqueid;
 
-      const deviceId = device[0].id;
-      const uniqueId = device[0].uniqueid;
-
-      // ✅ STEP 3: ensure vehicle exists
-      let vehicle = vehicleMap.get(serialKey);
-
-      if (!vehicle) {
+      // STEP 3: create device in PostgreSQL if it does NOT exist
+      let pgDevice = deviceMap.get(uniqueId);
+      if (!pgDevice) {
         const res = await pgPool.query(
-          `INSERT INTO vehicles (serial, plate_number, unit_name, status, created_at)
-           VALUES ($1,$2,$3,$4,$5)
-           RETURNING id, serial`,
-          [serialKey, r.reg_no || "", `Unit ${serialKey}`, "active", new Date()]
+          `INSERT INTO devices (uniqueid)
+           VALUES ($1)
+           RETURNING id, uniqueid`,
+          [uniqueId]
         );
-        vehicle = res.rows[0];
-        vehicleMap.set(serialKey, vehicle);
+        pgDevice = res.rows[0];
+        deviceMap.set(uniqueId, pgDevice);
+        console.log(`➕ Created device ${uniqueId}`);
       }
 
-      // ✅ STEP 4: incremental sync
-     const lastRes = await pgPool.query(
-  "SELECT MAX(signal_time) AS lasttime FROM telemetry WHERE device_id=$1",
-  [deviceId]
-);
-
+      // STEP 4: get last synced telemetry time
+      const lastRes = await pgPool.query(
+        "SELECT MAX(signal_time) AS lasttime FROM telemetry WHERE device_id=$1",
+        [pgDevice.id]
+      );
       const lastTime = lastRes.rows[0].lasttime || "2000-01-01 00:00:00";
 
+      // STEP 5: fetch telemetry from MariaDB in batches
       let offset = 0;
-
       while (true) {
         const events = await conn.query(
           `SELECT latitude, longitude, speed, servertime
@@ -157,41 +156,41 @@ export async function syncTelemetry() {
            WHERE deviceid = ? AND servertime > ?
            ORDER BY servertime ASC
            LIMIT ? OFFSET ?`,
-          [deviceId, lastTime, FETCH_LIMIT, offset]
+          [mariaDevice.id, lastTime, FETCH_LIMIT, offset]
         );
-
         if (!events.length) break;
 
         for (let i = 0; i < events.length; i += INSERT_BATCH) {
           const batch = events.slice(i, i + INSERT_BATCH);
+
           const values = [];
+          const placeholders = batch
+            .map((e, idx) => {
+              const off = idx * 5;
+              values.push(
+                pgDevice.id,
+                e.servertime,
+                e.latitude,
+                e.longitude,
+                e.speed || 0
+              );
+              return `($${off + 1},$${off + 2},$${off + 3},$${off + 4},$${off + 5})`;
+            })
+            .join(",");
 
-          const placeholders = batch.map((e, idx) => {
-            const off = idx * 5;
-           values.push(
-           deviceId,
-           e.servertime,
-           e.latitude,
-           e.longitude,
-           e.speed || 0
-           );
-            return `($${off + 1},$${off + 2},$${off + 3},$${off + 4},$${off + 5})`;
-          }).join(",");
-
-       await pgPool.query(
-       `INSERT INTO telemetry
-        (device_id, signal_time, latitude, longitude, speed)
-        VALUES ${placeholders}
-        ON CONFLICT DO NOTHING`,
+          await pgPool.query(
+            `INSERT INTO telemetry
+             (device_id, signal_time, latitude, longitude, speed)
+             VALUES ${placeholders}
+             ON CONFLICT DO NOTHING`,
             values
-         );
+          );
         }
 
-        console.log(`📦 Telemetry synced: ${uniqueId} - ${events.length}`);
         offset += events.length;
+        console.log(`📦 Telemetry synced: ${uniqueId} - ${events.length}`);
       }
     }
-
   } finally {
     conn.release();
   }
