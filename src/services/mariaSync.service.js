@@ -29,16 +29,21 @@ export const pgPool = new Pool({
 // =========================
 // 2️⃣ MariaDB Pool
 // =========================
+
+console.log("Postgres host:", process.env.PG_HOST);
+console.log("Postgres user:", process.env.PG_USER);
+console.log("Postgres password:", typeof process.env.PG_PASSWORD);
+console.log("Postgres db:", process.env.PG_DATABASE);
+
 const mariaPool = createPool({
   host: process.env.MARIA_DB_HOST,
   port: Number(process.env.MARIA_DB_PORT || 3306),
   user: process.env.MARIA_DB_USER,
   password: process.env.MARIA_DB_PASSWORD,
   database: process.env.MARIA_DB_NAME || "uradi",
-  connectionLimit: 5,
-  acquireTimeout: 10000, // optional safety
+  connectionLimit: 20,      // increase from 5
+  acquireTimeout: 15000
 });
-
 // =========================
 // 3️⃣ Config
 // =========================
