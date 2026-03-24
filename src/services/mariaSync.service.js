@@ -5,7 +5,6 @@ import { createPool } from "mariadb";  // fixed ESM import
 import { Pool } from "pg";
 import fs from "fs";
 
-
 // =========================
 // 1️⃣ PostgreSQL Pool
 // =========================
@@ -29,7 +28,6 @@ export const pgPool = new Pool({
 // =========================
 // 2️⃣ MariaDB Pool
 // =========================
-
 console.log("Postgres host:", process.env.PG_HOST);
 console.log("Postgres user:", process.env.PG_USER);
 console.log("Postgres password:", typeof process.env.PG_PASSWORD);
@@ -42,8 +40,9 @@ const mariaPool = createPool({
   password: process.env.MARIA_DB_PASSWORD,
   database: process.env.MARIA_DB_NAME || "uradi",
   connectionLimit: 20,      // increase from 5
-  acquireTimeout: 15000
+  acquireTimeout: 30000
 });
+
 // =========================
 // 3️⃣ Config
 // =========================
@@ -98,7 +97,7 @@ export async function syncVehicles() {
 }
 
 // =========================
-// 5️⃣ Telemetry Sync
+// 5️⃣ Telemetry Sync (4-step logic)
 // =========================
 export async function syncTelemetry() {
   const conn = await mariaPool.getConnection();
@@ -106,12 +105,31 @@ export async function syncTelemetry() {
     const pgVehiclesRes = await pgPool.query("SELECT id, serial, plate_number FROM vehicles");
     const vehicleMap = new Map(pgVehiclesRes.rows.map((v) => [v.serial, v]));
 
-    const devices = await conn.query("SELECT id, uniqueid, imei, simno, protocol FROM device");
+    // Step 1: Fetch serials from device table
+    const devices = await conn.query("SELECT serial FROM device");
 
     for (const d of devices) {
-      const serialKey = d.uniqueid.startsWith("0") ? d.uniqueid : `0${d.uniqueid}`;
-      let vehicle = vehicleMap.get(serialKey);
+      // Step 2: Add 0 and get uniqueid from registration
+      const serialKey = `0${d.serial}`;
+      const registration = await conn.query(
+        "SELECT uniqueid FROM registration WHERE serial = ?",
+        [serialKey]
+      );
+      if (!registration.length) continue;
+      const uniqueId = registration[0].uniqueid;
 
+      // Step 3: Fetch telemetry from eventData using uniqueId
+      const telemetryRows = await conn.query(
+        `SELECT latitude, longitude, speed, servertime
+         FROM eventData
+         WHERE deviceid = ?
+         ORDER BY servertime ASC`,
+        [uniqueId]
+      );
+      if (!telemetryRows.length) continue;
+
+      // Step 4: Ensure vehicle exists in PostgreSQL
+      let vehicle = vehicleMap.get(serialKey);
       if (!vehicle) {
         const res = await pgPool.query(
           `INSERT INTO vehicles (serial, unit_name, status, created_at)
@@ -124,56 +142,27 @@ export async function syncTelemetry() {
         console.log(`➕ Creating missing vehicle ${serialKey}`);
       }
 
-      const lastRes = await pgPool.query(
-        "SELECT MAX(signal_time) AS lasttime FROM telemetry WHERE vehicle_id=$1",
-        [vehicle.id]
-      );
-      const lastTime = lastRes.rows[0].lasttime || "2000-01-01 00:00:00";
+      // Insert telemetry in batches
+      for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
+        const batch = telemetryRows.slice(i, i + INSERT_BATCH);
+        const values = [];
+        const placeholders = batch
+          .map((e, idx) => {
+            const off = idx * 5;
+            values.push(vehicle.id, e.latitude, e.longitude, e.speed || 0, e.servertime);
+            return `($${off + 1},$${off + 2},$${off + 3},$${off + 4},$${off + 5})`;
+          })
+          .join(",");
 
-      let offset = 0;
-      while (true) {
-        const events = await conn.query(
-          `SELECT latitude, longitude, speed, servertime
-           FROM eventData
-           WHERE deviceid=? AND servertime>?
-           ORDER BY servertime ASC
-           LIMIT ? OFFSET ?`,
-          [d.id, lastTime, FETCH_LIMIT, offset]
+        await pgPool.query(
+          `INSERT INTO telemetry
+           (vehicle_id, latitude, longitude, speed_kph, device_time)
+           VALUES ${placeholders}
+           ON CONFLICT (vehicle_id, device_time) DO NOTHING`,
+          values
         );
-        if (!events.length) break;
-
-        for (let i = 0; i < events.length; i += INSERT_BATCH) {
-          const batch = events.slice(i, i + INSERT_BATCH);
-          const values = [];
-          const placeholders = batch
-            .map((e, idx) => {
-              const off = idx * 9;
-              values.push(
-                vehicle.id,
-                vehicle.plate_number || "",
-                d.imei || null,
-                d.simno || null,
-                d.protocol || null,
-                e.latitude,
-                e.longitude,
-                e.speed || 0,
-                e.servertime
-              );
-              return `($${off + 1},$${off + 2},$${off + 3},$${off + 4},$${off + 5},$${off + 6},$${off + 7},$${off + 8},$${off + 9})`;
-            })
-            .join(",");
-
-          const query = `
-            INSERT INTO telemetry
-            (vehicle_id, label, imei, sim_number, protocol_type, latitude, longitude, speed_kph, device_time)
-            VALUES ${placeholders}
-            ON CONFLICT (vehicle_id, device_time) DO NOTHING
-          `;
-          await pgPool.query(query, values);
-        }
-        console.log(`📦 Telemetry synced: ${vehicle.serial} - ${events.length} rows`);
-        offset += events.length;
       }
+      console.log(`📦 Telemetry synced: ${serialKey} - ${telemetryRows.length} rows`);
     }
   } finally {
     conn.release();
