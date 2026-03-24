@@ -141,10 +141,10 @@ export async function syncTelemetry() {
       }
 
       // ✅ STEP 4: incremental sync
-      const lastRes = await pgPool.query(
-        "SELECT MAX(device_time) AS lasttime FROM telemetry WHERE vehicle_id=$1",
-        [vehicle.id]
-      );
+     const lastRes = await pgPool.query(
+  "SELECT MAX(signal_time) AS lasttime FROM telemetry WHERE device_id=$1",
+  [deviceId]
+);
 
       const lastTime = lastRes.rows[0].lasttime || "2000-01-01 00:00:00";
 
@@ -168,23 +168,23 @@ export async function syncTelemetry() {
 
           const placeholders = batch.map((e, idx) => {
             const off = idx * 5;
-            values.push(
-              vehicle.id,
-              e.latitude,
-              e.longitude,
-              e.speed || 0,
-              e.servertime
-            );
+           values.push(
+           deviceId,
+           e.servertime,
+           e.latitude,
+           e.longitude,
+           e.speed || 0
+           );
             return `($${off + 1},$${off + 2},$${off + 3},$${off + 4},$${off + 5})`;
           }).join(",");
 
-          await pgPool.query(
-            `INSERT INTO telemetry
-             (vehicle_id, latitude, longitude, speed_kph, device_time)
-             VALUES ${placeholders}
-             ON CONFLICT (vehicle_id, device_time) DO NOTHING`,
+       await pgPool.query(
+       `INSERT INTO telemetry
+        (device_id, signal_time, latitude, longitude, speed)
+        VALUES ${placeholders}
+        ON CONFLICT DO NOTHING`,
             values
-          );
+         );
         }
 
         console.log(`📦 Telemetry synced: ${uniqueId} - ${events.length}`);
