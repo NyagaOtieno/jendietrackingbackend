@@ -1,5 +1,5 @@
 // src/services/mariaSync.service.js
-import mariadb from "mariadb";
+import { createPool } from "mariadb"; // ✅ use named import
 import { Pool } from "pg";
 import fs from "fs";
 import dotenv from "dotenv";
@@ -29,14 +29,14 @@ export const pgPool = new Pool({
 // -------------------------
 // 2️⃣ MariaDB Pool
 // -------------------------
-let mariaPool = mariadb.createPool({
+let mariaPool = createPool({   // ✅ use createPool directly
   host: process.env.MARIA_DB_HOST,
   port: Number(process.env.MARIA_DB_PORT || 3306),
   user: process.env.MARIA_DB_USER,
   password: process.env.MARIA_DB_PASSWORD,
   database: process.env.MARIA_DB_NAME || "uradi",
   connectionLimit: 5,
-  acquireTimeout: 10000, // 10s timeout
+  acquireTimeout: 10000,
 });
 
 // -------------------------
