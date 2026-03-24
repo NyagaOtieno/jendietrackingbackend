@@ -154,35 +154,45 @@ for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
   const values = [];
   const placeholders = batch
     .map((e, idx) => {
-    const off = idx * 23;
+    const off = idx * 24;
 
 values.push(
-  deviceId,
-  e.protocol || null,
-  e.servertime || new Date(),
-  e.devicetime || null,
-  e.fixtime || null,
-  e.valid ?? true,
-  e.latitude,
-  e.longitude,
-  e.altitude || null,
-  e.speed || 0,
-  e.course || null,
+  deviceId,                               // device_id
+  e.protocol || null,                     // protocol
+  new Date(e.servertime),                 // signal_time
+  e.devicetime ? new Date(e.devicetime) : null,
+  e.fixtime ? new Date(e.fixtime) : null,
+
+  e.valid === 1 || e.valid === true,      // valid
+
+  Number(e.latitude) || 0,                // latitude
+  Number(e.longitude) || 0,               // longitude
+  e.altitude != null ? Number(e.altitude) : null,
+  e.speed != null ? Number(e.speed) : 0,
+  e.course != null ? Number(e.course) : null,
+
   e.address || null,
   e.attributes || null,
-  e.accuracy || 0,
+
+  e.accuracy != null ? Number(e.accuracy) : null,
   e.network || null,
-  e.statuscode ?? false,
+
+  e.statuscode === 1 || e.statuscode === true,
   e.alarmcode || null,
-  e.speedlimit || 80,
-  e.odometer || 0,
-  e.isRead ?? false,
-  e.signalwireconnected ?? true,
-  e.powerwireconnected ?? true,
-  e.eactime || null
+
+  e.speedlimit != null ? Number(e.speedlimit) : null,
+  e.odometer != null ? Number(e.odometer) : null,
+
+  e.isRead === 1 || e.isRead === true,
+  e.signalwireconnected === 1 || e.signalwireconnected === true,
+  e.powerwireconnected === 1 || e.powerwireconnected === true,
+
+  e.eactime ? new Date(e.eactime) : null,
+
+  new Date()                              // created_at
 );
 
-      return `(${Array.from({ length: 23 }, (_, j) => `$${off + j + 1}`).join(",")})`;
+      return `(${Array.from({ length: 24 }, (_, j) => `$${off + j + 1}`).join(",")})`;
     })
     .join(",");
 
