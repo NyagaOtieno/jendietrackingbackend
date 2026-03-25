@@ -1,7 +1,8 @@
 import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
-import { testDbConnection, pgPool } from "./config/db.js"; // added pgPool
+import { testDbConnection } from "./config/db.js";
+
 import positionsRoutes from "./routes/positions.routes.js";
 import fleetRoutes from "./routes/fleet.routes.js";
 import authRoutes from "./routes/auth.routes.js";
@@ -10,11 +11,11 @@ import devicesRoutes from "./routes/devices.routes.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import vehiclesRoutes from "./routes/vehicles.routes.js";
 import syncRoutes from "./routes/sync.routes.js";
-import telemetryRoutes from "./routes/telemetry.routes.js"; // added telemetry
+import telemetryRoutes from "./routes/telemetry.routes.js";
+import deviceRoutes from "./routes/device.routes.js";
+
 import cron from "node-cron";
 import { runMariaSync } from "./services/mariaSync.service.js";
-import deviceRoutes from "./routes/device.routes.js";
-import telemetryRoutes from "./routes/telemetry.routes.js";
 
 dotenv.config();
 
@@ -44,17 +45,16 @@ app.get("/health", async (_req, res) => {
   res.json({ success: true, message: "Backend is running", database: db });
 });
 
-// Mount all existing routes
+// ✅ Routes (ONLY ONCE EACH)
 app.use("/api/auth", authRoutes);
 app.use("/api/seed", seedRoutes);
 app.use("/api/accounts", accountsRoutes);
 app.use("/api/devices", devicesRoutes);
+app.use("/api/device", deviceRoutes);
 app.use("/api/positions", positionsRoutes);
 app.use("/api/fleet", fleetRoutes);
 app.use("/api/vehicles", vehiclesRoutes);
 app.use("/api/sync", syncRoutes);
-app.use("/api/telemetry", telemetryRoutes); // telemetry routes
-app.use("/api/device", deviceRoutes);
 app.use("/api/telemetry", telemetryRoutes);
 
 // 404 handler
