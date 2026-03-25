@@ -13,6 +13,7 @@ import vehiclesRoutes from "./routes/vehicles.routes.js";
 import syncRoutes from "./routes/sync.routes.js";
 import cron from "node-cron";
 import { runMariaSync } from "./services/mariaSync.service.js";
+import { startMariaSyncJob } from "./job/mariaSyncjob.js";
 
 let isRunning = false;
 
@@ -25,7 +26,7 @@ export function startMariaSyncJob() {
   let schedule = process.env.SYNC_CRON;
   if (!schedule || !/^[\d\*\/,\- ]+$/.test(schedule)) {
     console.warn("Invalid SYNC_CRON value, falling back to safe default");
-    schedule = "*/2 * * * *";
+    schedule = "*/5 * * * *";
   }
 
   cron.schedule(schedule, async () => {
@@ -100,6 +101,21 @@ app.use((error, _req, res, _next) => {
     success: false,
     message: "Internal server error",
   });
+});
+
+// server.js or routes file
+app.get('/api/telemetry/latest', async (req, res) => {
+  try {
+    const result = await pgPool.query(`
+      SELECT DISTINCT ON (device_id) 
+        device_id, latitude, longitude, signal_time
+      FROM telemetry
+      ORDER BY device_id, signal_time DESC
+    `);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 4000;
