@@ -97,22 +97,18 @@ export async function syncVehicles() {
 // =========================
 // 5️⃣ Telemetry Sync (Full Columns)
 // =========================
-// =========================
-// 5️⃣ Telemetry Sync (Incremental)
-// =========================
 export async function syncTelemetry() {
   const conn = await mariaPool.getConnection();
 
   try {
     console.log("🔄 Starting telemetry sync using device.id...");
 
-    // Step 1: get registration serials
     const registrations = await conn.query("SELECT serial FROM registration");
 
     for (const r of registrations) {
       const serialKey = `0${r.serial}`;
 
-      // Step 2: get device from MariaDB
+      // Step 1: Get device
       const deviceRes = await conn.query(
         "SELECT id, uniqueid FROM device WHERE uniqueid = ?",
         [serialKey]
@@ -123,14 +119,30 @@ export async function syncTelemetry() {
       const deviceId = deviceRes[0].id;
       const uniqueId = deviceRes[0].uniqueid;
 
-      // Step 3: get last synced time for this device from Postgres
+      console.log(`⏳ Syncing telemetry for device ${uniqueId}...`);
+
+      // Step 2: Get last synced time (Postgres)
       const lastSyncedRes = await pgPool.query(
-        `SELECT MAX(signal_time) as last_synced FROM telemetry WHERE device_id = $1`,
+        `SELECT MAX(signal_time) as last_synced 
+         FROM telemetry 
+         WHERE device_id = $1`,
         [deviceId]
       );
-      const lastSynced = lastSyncedRes.rows[0]?.last_synced || new Date(0); // default to epoch if never synced
 
-      // Step 4: fetch only new telemetry from MariaDB
+      let lastSynced = lastSyncedRes.rows[0]?.last_synced;
+
+      // Default if no data
+      if (!lastSynced) {
+        lastSynced = new Date(0);
+      }
+
+      // 🔥 IMPORTANT: Convert to MariaDB format
+      const lastSyncedMaria = new Date(lastSynced)
+        .toISOString()
+        .slice(0, 19)
+        .replace("T", " ");
+
+      // Step 3: Fetch ONLY NEW data (with LIMIT protection)
       const telemetryRows = await conn.query(
         `SELECT 
           protocol,
@@ -159,13 +171,19 @@ export async function syncTelemetry() {
         FROM eventData
         WHERE deviceid = ?
           AND servertime > ?
-        ORDER BY servertime ASC`,
-        [deviceId, lastSynced]
+        ORDER BY servertime ASC
+        LIMIT 5000`,
+        [deviceId, lastSyncedMaria]
       );
 
-      if (!telemetryRows.length) continue;
+      if (!telemetryRows.length) {
+        console.log(`⚪ No new telemetry for ${uniqueId}`);
+        continue;
+      }
 
-      // Step 5: insert into Postgres in batches
+      let insertedCount = 0;
+
+      // Step 4: Insert in chunks
       for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
         const batch = telemetryRows.slice(i, i + INSERT_BATCH);
         const values = [];
@@ -205,7 +223,7 @@ export async function syncTelemetry() {
           })
           .join(",");
 
-        await pgPool.query(
+        const result = await pgPool.query(
           `INSERT INTO telemetry (
             device_id,
             protocol,
@@ -235,9 +253,13 @@ export async function syncTelemetry() {
           ON CONFLICT (device_id, signal_time) DO NOTHING`,
           values
         );
+
+        insertedCount += result.rowCount || 0;
       }
 
-      console.log(`📦 Telemetry synced: ${uniqueId} → ${telemetryRows.length} new rows`);
+      console.log(
+        `📦 Telemetry synced: ${uniqueId} → ${insertedCount} inserted (from ${telemetryRows.length} fetched)`
+      );
     }
   } catch (err) {
     console.error("❌ Telemetry sync error:", err);
@@ -245,6 +267,7 @@ export async function syncTelemetry() {
     conn.release();
   }
 }
+
 // =========================
 // 6️⃣ Main Sync
 // =========================
