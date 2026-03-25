@@ -14,6 +14,7 @@ import syncRoutes from "./routes/sync.routes.js";
 import cron from "node-cron";
 import { runMariaSync } from "./services/mariaSync.service.js";
 import { startMariaSyncJob } from "./job/mariaSyncjob.js";
+import telemetryRoutes from './routes/telemetry.routes.js';
 
 let isRunning = false;
 
@@ -79,6 +80,21 @@ app.get("/health", async (_req, res) => {
   });
 });
 
+// server.js or routes file
+app.get('/api/telemetry/latest', async (req, res) => {
+  try {
+    const result = await pgPool.query(`
+      SELECT DISTINCT ON (device_id) 
+        device_id, latitude, longitude, signal_time
+      FROM telemetry
+      ORDER BY device_id, signal_time DESC
+    `);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.use("/api/auth", authRoutes);
 app.use("/api/seed", seedRoutes);
 app.use("/api/accounts", accountsRoutes);
@@ -87,6 +103,7 @@ app.use("/api/positions", positionsRoutes);
 app.use("/api/fleet", fleetRoutes);
 app.use("/api/vehicles", vehiclesRoutes);
 app.use("/api/sync", syncRoutes);
+app.use('/api/telemetry', telemetryRoutes);
 
 app.use((req, res) => {
   res.status(404).json({
@@ -103,20 +120,6 @@ app.use((error, _req, res, _next) => {
   });
 });
 
-// server.js or routes file
-app.get('/api/telemetry/latest', async (req, res) => {
-  try {
-    const result = await pgPool.query(`
-      SELECT DISTINCT ON (device_id) 
-        device_id, latitude, longitude, signal_time
-      FROM telemetry
-      ORDER BY device_id, signal_time DESC
-    `);
-    res.json({ success: true, data: result.rows });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 const PORT = process.env.PORT || 4000;
 
