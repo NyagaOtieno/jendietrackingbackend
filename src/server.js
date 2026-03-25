@@ -12,7 +12,7 @@ import accountsRoutes from "./routes/accounts.routes.js";
 import vehiclesRoutes from "./routes/vehicles.routes.js";
 import syncRoutes from "./routes/sync.routes.js";
 import telemetryRoutes from "./routes/telemetry.routes.js";
-import deviceRoutes from "./routes/device.routes.js";
+
 
 import cron from "node-cron";
 import { runMariaSync } from "./services/mariaSync.service.js";
@@ -50,7 +50,6 @@ app.use("/api/auth", authRoutes);
 app.use("/api/seed", seedRoutes);
 app.use("/api/accounts", accountsRoutes);
 app.use("/api/devices", devicesRoutes);
-app.use("/api/device", deviceRoutes);
 app.use("/api/positions", positionsRoutes);
 app.use("/api/fleet", fleetRoutes);
 app.use("/api/vehicles", vehiclesRoutes);
