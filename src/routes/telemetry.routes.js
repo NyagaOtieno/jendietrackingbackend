@@ -3,8 +3,7 @@ import { pgPool } from "../config/db.js";
 
 const router = express.Router();
 
-// GET latest telemetry per device
-router.get("/latest", async (req, res) => {
+router.get("/latest", async (_req, res) => {
   try {
     const result = await pgPool.query(`
       SELECT DISTINCT ON (device_id) 
