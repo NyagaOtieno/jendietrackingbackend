@@ -1,5 +1,10 @@
 import { query } from "../config/db.js";
 import { isPrivilegedRole } from "../middleware/auth.js";
+import crypto from "crypto";
+
+function generateApiKey() {
+  return crypto.randomBytes(32).toString("hex");
+}
 
 function isPrivileged(req) {
   return isPrivilegedRole(req.user.role);
@@ -107,34 +112,65 @@ export async function getDeviceById(req, res) {
   }
 }
 
+
 export async function createDevice(req, res) {
   try {
     const {
-      device_uid,
       label = null,
-      imei = null,
+      imei,
       sim_number = null,
       protocol_type = null,
       vehicle_id = null,
       expires_at = null,
     } = req.body;
 
-   
+    // ✅ validation
+    if (!imei) {
+      return res.status(400).json({
+        success: false,
+        message: "imei is required",
+      });
+    }
+
+    // ✅ prevent duplicates
+    const existing = await query(
+      `SELECT id FROM devices WHERE imei = $1 LIMIT 1`,
+      [imei]
+    );
+
+    if (existing.rows.length) {
+      return res.status(409).json({
+        success: false,
+        message: "Device with this IMEI already exists",
+      });
+    }
+
+    const apiKey = generateApiKey();
+
     const result = await query(
       `
       INSERT INTO devices (
-        device_uid,
         label,
         imei,
         sim_number,
         protocol_type,
         vehicle_id,
-        expires_at
+        expires_at,
+        api_key,
+        status
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
       RETURNING *
       `,
-      [device_uid, label, imei, sim_number, protocol_type, vehicle_id, expires_at]
+      [
+        label,
+        imei,
+        sim_number,
+        protocol_type,
+        vehicle_id,
+        expires_at,
+        apiKey,
+      ]
     );
 
     return res.status(201).json({
@@ -143,9 +179,11 @@ export async function createDevice(req, res) {
     });
   } catch (error) {
     console.error("createDevice error:", error);
+
     return res.status(500).json({
       success: false,
       message: "Failed to create device",
+      error: error.message, // TEMP DEBUG
     });
   }
 }
