@@ -99,30 +99,109 @@ export async function syncVehicles() {
 // =========================
 export async function syncTelemetry() {
   const conn = await mariaPool.getConnection();
+
   try {
     console.log("🔄 Starting telemetry sync using device.id...");
 
-    // Step 1: fetch all serials from registration
+    // Step 1: get registration serials
     const registrations = await conn.query("SELECT serial FROM registration");
 
     for (const r of registrations) {
-      const serialKey = `0${r.serial}`; // registration.serial matches device.uniqueid
+      const serialKey = `0${r.serial}`;
 
-      // Step 2: get device.id from MariaDB device table
-      const devices = await conn.query(
-        "SELECT id FROM device WHERE uniqueid = ?",
+      // Step 2: get device from MariaDB
+      const deviceRes = await conn.query(
+        "SELECT id, uniqueid FROM device WHERE uniqueid = ?",
         [serialKey]
       );
-      if (!devices.length) continue;
-      const deviceId = devices[0].id;
 
-      // Step 3: fetch telemetry from MariaDB eventData using device.id
+      if (!deviceRes.length) continue;
+
+      const deviceId = deviceRes[0].id;
+      const uniqueId = deviceRes[0].uniqueid;
+
+      // Step 3: fetch telemetry from eventData using device.id
       const telemetryRows = await conn.query(
-        `SELECT
-            deviceid,
-            servertime,
-            devicetime,
-            fixtime,
+        `SELECT 
+          protocol,
+          deviceid,
+          servertime,
+          devicetime,
+          fixtime,
+          valid,
+          latitude,
+          longitude,
+          altitude,
+          speed,
+          course,
+          address,
+          attributes,
+          accuracy,
+          network,
+          statuscode,
+          alarmcode,
+          speedlimit,
+          odometer,
+          isRead,
+          signalwireconnected,
+          powerwireconnected,
+          eactime
+        FROM eventData
+        WHERE deviceid = ?
+        ORDER BY servertime ASC`,
+        [deviceId]
+      );
+
+      if (!telemetryRows.length) continue;
+
+      // Step 4: insert into Postgres (STRICT MATCH)
+      for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
+        const batch = telemetryRows.slice(i, i + INSERT_BATCH);
+
+        const values = [];
+
+        const placeholders = batch
+          .map((e, idx) => {
+            const off = idx * 24;
+
+            values.push(
+              deviceId,                                  // 1
+              e.protocol || null,                        // 2
+              new Date(e.servertime),                    // 3
+              e.devicetime ? new Date(e.devicetime) : null, // 4
+              e.fixtime ? new Date(e.fixtime) : null,    // 5
+              e.valid === 1 || e.valid === true,         // 6
+              Number(e.latitude) || 0,                   // 7
+              Number(e.longitude) || 0,                  // 8
+              e.altitude != null ? Number(e.altitude) : null, // 9
+              e.speed != null ? Number(e.speed) : 0,     // 10
+              e.course != null ? Number(e.course) : null,// 11
+              e.address || null,                         // 12
+              e.attributes || null,                      // 13
+              e.accuracy != null ? Number(e.accuracy) : null, // 14
+              e.network || null,                         // 15
+              e.statuscode === 1 || e.statuscode === true, // 16
+              e.alarmcode || null,                       // 17
+              e.speedlimit != null ? Number(e.speedlimit) : null, // 18
+              e.odometer != null ? Number(e.odometer) : null, // 19
+              e.isRead === 1 || e.isRead === true,       // 20
+              e.signalwireconnected === 1 || e.signalwireconnected === true, // 21
+              e.powerwireconnected === 1 || e.powerwireconnected === true,   // 22
+              e.eactime ? new Date(e.eactime) : null,    // 23
+              new Date()                                 // 24
+            );
+
+            return `(${Array.from({ length: 24 }, (_, j) => `$${off + j + 1}`).join(",")})`;
+          })
+          .join(",");
+
+        await pgPool.query(
+          `INSERT INTO telemetry (
+            device_id,
+            protocol,
+            signal_time,
+            device_time,
+            fix_time,
             valid,
             latitude,
             longitude,
@@ -137,77 +216,21 @@ export async function syncTelemetry() {
             alarmcode,
             speedlimit,
             odometer,
-            isRead,
+            isread,
             signalwireconnected,
             powerwireconnected,
-            eactime
-         FROM eventData
-         WHERE deviceid = ?
-         ORDER BY servertime ASC`,
-        [deviceId]
-      );
-      if (!telemetryRows.length) continue;
+            eactime,
+            created_at
+          ) VALUES ${placeholders}
+          ON CONFLICT (device_id, signal_time) DO NOTHING`,
+          values
+        );
+      }
 
-      // Step 5: insert telemetry in batches (FIXED placeholders mismatch)
-for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
-  const batch = telemetryRows.slice(i, i + INSERT_BATCH);
-  const values = [];
-  const placeholders = batch
-    .map((e, idx) => {
-    const off = idx * 24;
-
-values.push(
-  deviceId,                               // device_id
-  e.protocol || null,                     // protocol
-  new Date(e.servertime),                 // signal_time
-  e.devicetime ? new Date(e.devicetime) : null,
-  e.fixtime ? new Date(e.fixtime) : null,
-
-  e.valid === 1 || e.valid === true,      // valid
-
-  Number(e.latitude) || 0,                // latitude
-  Number(e.longitude) || 0,               // longitude
-  e.altitude != null ? Number(e.altitude) : null,
-  e.speed != null ? Number(e.speed) : 0,
-  e.course != null ? Number(e.course) : null,
-
-  e.address || null,
-  e.attributes || null,
-
-  e.accuracy != null ? Number(e.accuracy) : null,
-  e.network || null,
-
-  e.statuscode === 1 || e.statuscode === true,
-  e.alarmcode || null,
-
-  e.speedlimit != null ? Number(e.speedlimit) : null,
-  e.odometer != null ? Number(e.odometer) : null,
-
-  e.isRead === 1 || e.isRead === true,
-  e.signalwireconnected === 1 || e.signalwireconnected === true,
-  e.powerwireconnected === 1 || e.powerwireconnected === true,
-
-  e.eactime ? new Date(e.eactime) : null,
-
-  new Date()                              // created_at
-);
-
-      return `(${Array.from({ length: 24 }, (_, j) => `$${off + j + 1}`).join(",")})`;
-    })
-    .join(",");
-
-  await pgPool.query(
-    `INSERT INTO telemetry
-      (device_id, latitude, longitude, speed, signal_time,
-       devicetime, fixtime, valid, altitude, course, address, attributes,
-       accuracy, network, statuscode, alarmcode, speedlimit, odometer,
-       isread, signalwireconnected, powerwireconnected, eactime, created_at)
-     VALUES ${placeholders}`,
-    values
-  );
-}
-      console.log(`📦 Telemetry synced: ${serialKey} - ${telemetryRows.length} rows`);
+      console.log(`📦 Telemetry synced: ${uniqueId} → ${telemetryRows.length} rows`);
     }
+  } catch (err) {
+    console.error("❌ Telemetry sync error:", err);
   } finally {
     conn.release();
   }
