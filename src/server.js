@@ -13,6 +13,8 @@ import syncRoutes from "./routes/sync.routes.js";
 import telemetryRoutes from "./routes/telemetry.routes.js"; // added telemetry
 import cron from "node-cron";
 import { runMariaSync } from "./services/mariaSync.service.js";
+import deviceRoutes from "./routes/device.routes.js";
+import telemetryRoutes from "./routes/telemetry.routes.js";
 
 dotenv.config();
 
@@ -52,6 +54,8 @@ app.use("/api/fleet", fleetRoutes);
 app.use("/api/vehicles", vehiclesRoutes);
 app.use("/api/sync", syncRoutes);
 app.use("/api/telemetry", telemetryRoutes); // telemetry routes
+app.use("/api/device", deviceRoutes);
+app.use("/api/telemetry", telemetryRoutes);
 
 // 404 handler
 app.use((req, res) => {

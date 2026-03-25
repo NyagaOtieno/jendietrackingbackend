@@ -119,13 +119,7 @@ export async function createDevice(req, res) {
       expires_at = null,
     } = req.body;
 
-    if (!device_uid) {
-      return res.status(400).json({
-        success: false,
-        message: "device_uid is required",
-      });
-    }
-
+   
     const result = await query(
       `
       INSERT INTO devices (
