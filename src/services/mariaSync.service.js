@@ -200,35 +200,34 @@ export async function syncTelemetry() {
           .join(",");
 
         await pgPool.query(
-          `INSERT INTO telemetry (
-            device_id,
-            protocol,
-            signal_time,
-            device_time,
-            fix_time,
-            valid,
-            latitude,
-            longitude,
-            altitude,
-            speed,
-            course,
-            address,
-            attributes,
-            accuracy,
-            network,
-            statuscode,
-            alarmcode,
-            speedlimit,
-            odometer,
-            isread,
-            signalwireconnected,
-            powerwireconnected,
-            eactime,
-            created_at
-          ) VALUES ${placeholders}
-          ON CONFLICT (device_id, signal_time) DO NOTHING`,
-          values
-        );
+  `INSERT INTO telemetry (
+    device_id,
+    protocol,
+    signal_time,
+    device_time,
+    fix_time,
+    valid,
+    latitude,
+    longitude,
+    altitude,
+    speed,
+    course,
+    address,
+    attributes,
+    accuracy,
+    network,
+    statuscode,
+    alarmcode,
+    speedlimit,
+    odometer,
+    isread,
+    signalwireconnected,
+    powerwireconnected,
+    eactime,
+    created_at
+  ) VALUES ${placeholders}`,
+  values
+);
 
         lastId = telemetryRows[telemetryRows.length - 1].id;
         console.log(`📦 Synced ${rowsFetched} rows for ${uniqueId} (last id ${lastId})`);
