@@ -199,7 +199,7 @@ export async function syncTelemetry() {
           })
           .join(",");
 
-        await pgPool.query(
+await pgPool.query(
   `INSERT INTO telemetry (
     device_id,
     protocol,
@@ -225,7 +225,7 @@ export async function syncTelemetry() {
     powerwireconnected,
     eactime,
     created_at
-  ) VALUES ${placeholders}`,
+  ) VALUES ${placeholders}`,  // <-- no ON CONFLICT
   values
 );
 
