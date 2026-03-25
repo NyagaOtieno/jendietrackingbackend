@@ -120,54 +120,59 @@ export async function syncTelemetry() {
       const deviceId = deviceRes[0].id;
       const uniqueId = deviceRes[0].uniqueid;
 
-      // Step 3: fetch telemetry from eventData using device.id
-      const telemetryRows = await conn.query(
-        `SELECT 
-          protocol,
-          deviceid,
-          servertime,
-          devicetime,
-          fixtime,
-          valid,
-          latitude,
-          longitude,
-          altitude,
-          speed,
-          course,
-          address,
-          attributes,
-          accuracy,
-          network,
-          statuscode,
-          alarmcode,
-          speedlimit,
-          odometer,
-          isRead,
-          signalwireconnected,
-          powerwireconnected,
-          eactime
-        FROM eventData
-        WHERE deviceid = ?
-        ORDER BY servertime ASC`,
-        [deviceId]
-      );
+      console.log(`⏳ Syncing telemetry for device ${uniqueId}...`);
 
-      if (!telemetryRows.length) continue;
+      // Step 3: fetch telemetry in batches directly from MariaDB
+      const BATCH_SIZE = 1000; // adjust as needed
+      let lastId = 0;
+      let rowsFetched;
 
-      // Step 4: insert into Postgres (STRICT MATCH)
-      for (let i = 0; i < telemetryRows.length; i += INSERT_BATCH) {
-        const batch = telemetryRows.slice(i, i + INSERT_BATCH);
+      do {
+        const telemetryRows = await conn.query(
+          `SELECT
+            id,
+            protocol,
+            deviceid,
+            servertime,
+            devicetime,
+            fixtime,
+            valid,
+            latitude,
+            longitude,
+            altitude,
+            speed,
+            course,
+            address,
+            attributes,
+            accuracy,
+            network,
+            statuscode,
+            alarmcode,
+            speedlimit,
+            odometer,
+            isRead,
+            signalwireconnected,
+            powerwireconnected,
+            eactime
+          FROM eventData
+          WHERE deviceid = ? AND id > ?
+          ORDER BY id ASC
+          LIMIT ?`,
+          [deviceId, lastId, BATCH_SIZE]
+        );
 
+        rowsFetched = telemetryRows.length;
+        if (!rowsFetched) break;
+
+        // Step 4: insert into Postgres
         const values = [];
-
-        const placeholders = batch
+        const placeholders = telemetryRows
           .map((e, idx) => {
             const off = idx * 24;
-
             values.push(
               deviceId,                                  // 1
               e.protocol || null,                        // 2
-              new Date(e.servertime),                    // 3
+              new Date(e.servertime),                     // 3
               e.devicetime ? new Date(e.devicetime) : null, // 4
               e.fixtime ? new Date(e.fixtime) : null,    // 5
               e.valid === 1 || e.valid === true,         // 6
@@ -190,7 +195,6 @@ export async function syncTelemetry() {
               e.eactime ? new Date(e.eactime) : null,    // 23
               new Date()                                 // 24
             );
-
             return `(${Array.from({ length: 24 }, (_, j) => `$${off + j + 1}`).join(",")})`;
           })
           .join(",");
@@ -225,9 +229,11 @@ export async function syncTelemetry() {
           ON CONFLICT (device_id, signal_time) DO NOTHING`,
           values
         );
-      }
 
-      console.log(`📦 Telemetry synced: ${uniqueId} → ${telemetryRows.length} rows`);
+        lastId = telemetryRows[telemetryRows.length - 1].id;
+        console.log(`📦 Synced ${rowsFetched} rows for ${uniqueId} (last id ${lastId})`);
+
+      } while (rowsFetched === BATCH_SIZE);
     }
   } catch (err) {
     console.error("❌ Telemetry sync error:", err);
