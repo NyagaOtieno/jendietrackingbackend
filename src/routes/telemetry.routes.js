@@ -34,12 +34,11 @@ router.get(
     t.longitude,
     t.speed,
     t.ignition,
-    t.recorded_at AS signal_time
+    COALESCE(t.recorded_at, t.signal_time, t.device_time) AS signal_time
   FROM telemetry t
-  ORDER BY t.device_id, t.recorded_at DESC
+  ORDER BY t.device_id, COALESCE(t.recorded_at, t.signal_time, t.device_time) DESC
   LIMIT ${parseInt(limit, 10)}
 `;
-
       const result = await pgPool.query(query, values);
 
       res.json({ success: true, data: result.rows });
