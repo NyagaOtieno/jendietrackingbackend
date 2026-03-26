@@ -27,20 +27,18 @@ router.get(
         where += values.length ? `AND t.device_id = $${values.length} ` : `WHERE t.device_id = $${values.length} `;
       }
 
-      const query = `
-        SELECT DISTINCT ON (t.device_id)
-          t.device_id,
-          t.latitude,
-          t.longitude,
-          t.speed,
-          t.ignition,
-          t.recorded_at AS signal_time
-        FROM telemetry t
-        JOIN devices d ON t.device_id = d.id
-        ${where}
-        ORDER BY t.device_id, t.recorded_at DESC
-        LIMIT ${parseInt(limit, 10)}
-      `;
+     const query = `
+  SELECT DISTINCT ON (t.device_id)
+    t.device_id,
+    t.latitude,
+    t.longitude,
+    t.speed,
+    t.ignition,
+    t.recorded_at AS signal_time
+  FROM telemetry t
+  ORDER BY t.device_id, t.recorded_at DESC
+  LIMIT ${parseInt(limit, 10)}
+`;
 
       const result = await pgPool.query(query, values);
 
