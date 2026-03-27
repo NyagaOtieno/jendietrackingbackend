@@ -2,41 +2,33 @@
 import { query } from "../config/db.js";
 import { isPrivilegedRole } from "../middleware/auth.js";
 
-/**
- * Check if the user can access all accounts (admin/privileged)
- */
 function canAccessAccountData(req) {
   return isPrivilegedRole(req.user.role);
 }
 
-/**
- * GET all vehicles
- */
+// ✅ Get all vehicles
 export async function getVehicles(req, res) {
   try {
     let sql = `
       SELECT
         v.id,
         v.plate_number,
-        v.unit_name,
-        v.make,
-        v.model,
-        v.year,
+        COALESCE(v.unit_name, '') AS unit_name,
+        COALESCE(v.make, '') AS make,
+        COALESCE(v.model, '') AS model,
+        COALESCE(v.year, 0) AS year,
         v.status,
         v.created_at,
-        v.serial AS device_uid, -- map serial as device UID
-        v.account_id,
-        a.account_name,
-        a.account_type
+        v.updated_at,
+        v.device_uid
       FROM vehicles v
-      LEFT JOIN accounts a ON a.id = v.account_id
     `;
 
     const params = [];
 
-    // 🔹 Restrict to user's account if not privileged
+    // Filter by account if user is not privileged
     if (!canAccessAccountData(req)) {
-      const accountId = req.user.accountId; // should be string UUID
+      const accountId = req.user.accountId; // must be UUID string
 
       if (!accountId) {
         return res.status(400).json({
@@ -66,9 +58,7 @@ export async function getVehicles(req, res) {
   }
 }
 
-/**
- * GET vehicle by ID
- */
+// ✅ Get single vehicle by ID
 export async function getVehicleById(req, res) {
   try {
     const { id } = req.params;
@@ -81,21 +71,17 @@ export async function getVehicleById(req, res) {
         COALESCE(v.make, '') AS make,
         COALESCE(v.model, '') AS model,
         COALESCE(v.year, 0) AS year,
-        COALESCE(v.account_id, '') AS account_id,
-        a.account_name,
-        a.account_type,
-        COALESCE(v.status, 'active') AS status,
+        COALESCE(v.account_id::text, '') AS account_id,
+        v.status,
         v.created_at,
         v.updated_at,
-        v.serial AS device_uid
+        v.device_uid
       FROM vehicles v
-      LEFT JOIN accounts a ON a.id = v.account_id
       WHERE v.id = $1
     `;
 
     const params = [parseInt(id, 10)];
 
-    // 🔹 Restrict to user's account if not privileged
     if (!canAccessAccountData(req)) {
       sql += ` AND v.account_id = $2::uuid `;
       params.push(req.user.accountId);
@@ -123,9 +109,7 @@ export async function getVehicleById(req, res) {
   }
 }
 
-/**
- * CREATE a new vehicle
- */
+// ✅ Create new vehicle
 export async function createVehicle(req, res) {
   try {
     const {
@@ -136,6 +120,7 @@ export async function createVehicle(req, res) {
       year = null,
       account_id = null,
       status = "active",
+      device_uid = null
     } = req.body;
 
     if (!plate_number) {
@@ -145,15 +130,13 @@ export async function createVehicle(req, res) {
       });
     }
 
-    const accId = account_id ?? null; // should be UUID string or null
-
     const result = await query(
       `
-      INSERT INTO vehicles (plate_number, unit_name, make, model, year, account_id, status)
-      VALUES ($1, $2, $3, $4, $5, $6::uuid, $7)
+      INSERT INTO vehicles (plate_number, unit_name, make, model, year, account_id, status, device_uid)
+      VALUES ($1, $2, $3, $4, $5, $6::uuid, $7, $8)
       RETURNING *
       `,
-      [plate_number, unit_name, make, model, year, accId, status]
+      [plate_number, unit_name, make, model, year, account_id, status, device_uid]
     );
 
     return res.status(201).json({
@@ -169,12 +152,11 @@ export async function createVehicle(req, res) {
   }
 }
 
-/**
- * UPDATE a vehicle
- */
+// ✅ Update existing vehicle
 export async function updateVehicle(req, res) {
   try {
     const { id } = req.params;
+    const { plate_number, unit_name, make, model, year, account_id, status, device_uid } = req.body;
 
     const existing = await query(`SELECT * FROM vehicles WHERE id = $1`, [parseInt(id, 10)]);
 
@@ -183,9 +165,6 @@ export async function updateVehicle(req, res) {
     }
 
     const current = existing.rows[0];
-    const { plate_number, unit_name, make, model, year, account_id, status } = req.body;
-
-    const accId = account_id ?? current.account_id; // keep current if null
 
     const result = await query(
       `
@@ -198,8 +177,9 @@ export async function updateVehicle(req, res) {
         year = $5,
         account_id = $6::uuid,
         status = $7,
+        device_uid = $8,
         updated_at = NOW()
-      WHERE id = $8
+      WHERE id = $9
       RETURNING *
       `,
       [
@@ -208,8 +188,9 @@ export async function updateVehicle(req, res) {
         make ?? current.make,
         model ?? current.model,
         year ?? current.year,
-        accId,
+        account_id ?? current.account_id,
         status ?? current.status,
+        device_uid ?? current.device_uid,
         id,
       ]
     );
@@ -224,9 +205,7 @@ export async function updateVehicle(req, res) {
   }
 }
 
-/**
- * DELETE a vehicle
- */
+// ✅ Delete vehicle
 export async function deleteVehicle(req, res) {
   try {
     const { id } = req.params;
