@@ -4,12 +4,12 @@
   "description": "Fleet tracking backend",
   "main": "src/server.js",
   "type": "module",
-  
- "scripts": {
-  "start": "node src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
     "dev": "node --watch src/server.js"
   },
   "dependencies": {
+    "amqplib": "^1.0.3",
     "axios": "^1.8.4",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
@@ -19,6 +19,7 @@
     "mariadb": "^3.5.2",
     "mysql2": "^3.20.0",
     "node-cron": "^4.2.1",
-    "pg": "^8.13.3"
+    "pg": "^8.13.3",
+    "zod": "^4.3.6"
   }
 }
