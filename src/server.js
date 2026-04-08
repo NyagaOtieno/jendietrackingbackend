@@ -74,9 +74,11 @@ app.use((error, _req, res, _next) => {
 // ─── Maria Sync Cron Job ──────────────────────────────────────────────────────
 export function startMariaSyncJob() {
   if (process.env.SYNC_ENABLED !== 'true') {
-    console.log('Maria sync job enabled');
-    return;
-  }
+  console.log('Maria sync job disabled'); // ← correct message
+  return;
+}
+
+console.log('Maria sync job enabled'); // ← move this here
 
   let schedule = process.env.SYNC_CRON;
   if (!schedule || !/^[\d\*\/,\- ]+$/.test(schedule)) {

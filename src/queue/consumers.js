@@ -48,46 +48,24 @@ async function startTelemetryConsumer() {
  */
 async function bulkInsertTelemetry(rows) {
   const placeholders = rows.map((_, i) => {
-    const b = i * 24;
-    return `(${Array.from({ length: 24 }, (_, j) => `$${b + j + 1}`).join(',')})`;
+    const b = i * 6;
+    return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6})`;
   }).join(',');
 
   const values = rows.flatMap(r => [
     r.deviceId,
-    r.protocol                        || null,
-    r.signalTime   ? new Date(r.signalTime)  : new Date(),   // signal_time (NOT NULL)
-    r.deviceTime   ? new Date(r.deviceTime)  : null,
-    r.fixTime      ? new Date(r.fixTime)     : null,
-    r.valid                           ?? false,
-    Number(r.latitude)                || 0,
-    Number(r.longitude)               || 0,
-    r.altitude     != null ? Number(r.altitude)    : null,
-    r.speed        != null ? Number(r.speed)        : 0,
-    r.course       != null ? Number(r.course)       : null,
-    r.address                         || null,
-    r.attributes                      || null,
-    r.accuracy     != null ? Number(r.accuracy)    : null,
-    r.network                         || null,
-    r.statuscode                      ?? false,
-    r.alarmcode                       || null,
-    r.speedlimit   != null ? Number(r.speedlimit)  : null,
-    r.odometer     != null ? Number(r.odometer)    : null,
-    r.isRead                          ?? false,
-    r.signalwireconnected             ?? false,
-    r.powerwireconnected              ?? false,
-    r.eactime      ? new Date(r.eactime)     : null,
-    new Date(),                                              // created_at
+    Number(r.latitude)  || 0,
+    Number(r.longitude) || 0,
+    r.speedKph  != null ? Number(r.speedKph)  : null,
+    r.heading   != null ? Number(r.heading)   : null,
+    r.deviceTime ? new Date(r.deviceTime) : null,
   ]);
 
   await pgPool.query(
     `INSERT INTO telemetry (
-       device_id, protocol, signal_time, device_time, fix_time,
-       valid, latitude, longitude, altitude, speed, course,
-       address, attributes, accuracy, network, statuscode,
-       alarmcode, speedlimit, odometer, isread,
-       signalwireconnected, powerwireconnected, eactime, created_at
+       device_id, latitude, longitude, speed_kph, heading, device_time
      ) VALUES ${placeholders}
-     ON CONFLICT (device_id, signal_time) DO NOTHING`,
+     ON CONFLICT DO NOTHING`,
     values
   );
 }

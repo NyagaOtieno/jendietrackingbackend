@@ -40,26 +40,24 @@ export async function syncVehicles() {
       const serialKey = r.serial ? `0${r.serial}` : null;
       if (!serialKey) continue;
 
-      await pgPool.query(
-        `INSERT INTO vehicles
-           (serial, plate_number, unit_name, make, model, year, status, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         ON CONFLICT (serial) DO UPDATE SET
-           plate_number = EXCLUDED.plate_number,
-           unit_name    = EXCLUDED.unit_name,
-           model        = EXCLUDED.model,
-           status       = EXCLUDED.status`,
-        [
-          serialKey,
-          r.reg_no       || '',
-          `Unit ${serialKey}`,
-          null,
-          r.vmodel       || '',
-          null,
-          r.pstatus      || 'inactive',
-          r.install_date || new Date(),
-        ]
-      );
+   await pgPool.query(
+  `INSERT INTO vehicles
+     (serial, plate_number, unit_name, model, status, created_at)
+   VALUES ($1,$2,$3,$4,$5,$6)
+   ON CONFLICT (serial) DO UPDATE SET
+     plate_number = EXCLUDED.plate_number,
+     unit_name    = EXCLUDED.unit_name,
+     model        = EXCLUDED.model,
+     status       = EXCLUDED.status`,
+  [
+    serialKey,
+    r.reg_no    || '',
+    `Unit ${serialKey}`,
+    r.vmodel    || '',
+    r.pstatus   || 'inactive',
+    r.install_date || new Date(),
+  ]
+);
     }
 
     console.log(`✅ Vehicles synced: ${rows.length}`);
@@ -75,10 +73,10 @@ async function syncDeviceTelemetry(deviceId, uniqueId) {
   const conn = await mariaPool.getConnection();
   try {
     // Get the last synced timestamp from Postgres for this device
-    const lastSyncedRes = await pgPool.query(
-      `SELECT MAX(signal_time) AS last_synced FROM telemetry WHERE device_id = $1`,
-      [deviceId]
-    );
+   const lastSyncedRes = await pgPool.query(
+  `SELECT MAX(received_at) AS last_synced FROM telemetry WHERE device_id = $1`,
+  [deviceId]
+);
 
     const lastSynced = lastSyncedRes.rows[0]?.last_synced
       ? new Date(lastSyncedRes.rows[0].last_synced)
@@ -107,34 +105,17 @@ async function syncDeviceTelemetry(deviceId, uniqueId) {
     if (!rows.length) return 0;
 
     // Map MariaDB rows → queue message format
-    const mapped = rows.map(e => ({
-      deviceId,
-      protocol:             e.protocol             || null,
-      signalTime:           new Date(e.servertime),
-      deviceTime:           e.devicetime           ? new Date(e.devicetime) : null,
-      fixTime:              e.fixtime              ? new Date(e.fixtime)    : null,
-      valid:                e.valid === 1           || e.valid === true,
-      latitude:             Number(e.latitude)      || 0,
-      longitude:            Number(e.longitude)     || 0,
-      altitude:             e.altitude   != null    ? Number(e.altitude)    : null,
-      speed:                e.speed      != null    ? Number(e.speed)       : 0,
-      course:               e.course     != null    ? Number(e.course)      : null,
-      address:              e.address               || null,
-      attributes:           e.attributes            || null,
-      accuracy:             e.accuracy   != null    ? Number(e.accuracy)    : null,
-      network:              e.network               || null,
-      statuscode:           e.statuscode === 1      || e.statuscode === true,
-      alarmcode:            e.alarmcode             || null,
-      speedlimit:           e.speedlimit != null    ? Number(e.speedlimit)  : null,
-      odometer:             e.odometer   != null    ? Number(e.odometer)    : null,
-      isRead:               e.isRead === 1          || e.isRead === true,
-      signalwireconnected:  e.signalwireconnected === 1 || e.signalwireconnected === true,
-      powerwireconnected:   e.powerwireconnected === 1  || e.powerwireconnected === true,
-      eactime:              e.eactime               ? new Date(e.eactime)   : null,
-
-      // Publish alarms as alerts too
-      hasAlert: !!e.alarmcode,
-    }));
+  const mapped = rows.map(e => ({
+  deviceId,
+  receivedAt:  new Date(e.servertime),
+  deviceTime:  e.devicetime ? new Date(e.devicetime) : null,
+  latitude:    Number(e.latitude)  || 0,
+  longitude:   Number(e.longitude) || 0,
+  speedKph:    e.speed  != null ? Number(e.speed)  : null,
+  heading:     e.course != null ? Number(e.course) : null,
+  alarmcode:   e.alarmcode || null,
+  hasAlert:    !!e.alarmcode,
+}));
 
     // Publish in batches to RabbitMQ — each message = INSERT_BATCH rows
     let published = 0;
@@ -190,10 +171,10 @@ export async function syncTelemetry() {
         const serialKey = `0${r.serial}`;
 
         // Resolve device ID from Postgres
-        const devRes = await pgPool.query(
-          `SELECT id FROM devices WHERE serial = $1 LIMIT 1`,
-          [serialKey]
-        );
+       const devRes = await pgPool.query(
+  `SELECT id FROM devices WHERE serial = $1 LIMIT 1`,
+  [serialKey]
+);
         if (!devRes.rows.length) return 0;
 
         const deviceId = devRes.rows[0].id;
