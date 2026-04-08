@@ -40,21 +40,21 @@ export async function syncVehicles() {
       const serialKey = r.serial ? `0${r.serial}` : null;
       if (!serialKey) continue;
 
-   await pgPool.query(
+ await pgPool.query(
   `INSERT INTO vehicles
      (serial, plate_number, unit_name, model, status, created_at)
-   VALUES ($1,$2,$3,$4,$5,$6)
-   ON CONFLICT (serial) DO UPDATE SET
-     plate_number = EXCLUDED.plate_number,
-     unit_name    = EXCLUDED.unit_name,
-     model        = EXCLUDED.model,
-     status       = EXCLUDED.status`,
+   VALUES ($1, $2, $3, $4, $5, $6)
+   ON CONFLICT (plate_number) DO UPDATE SET
+     serial    = EXCLUDED.serial,
+     unit_name = EXCLUDED.unit_name,
+     model     = EXCLUDED.model,
+     status    = EXCLUDED.status`,
   [
     serialKey,
-    r.reg_no    || '',
+    r.reg_no       || '',
     `Unit ${serialKey}`,
-    r.vmodel    || '',
-    r.pstatus   || 'inactive',
+    r.vmodel       || '',
+    r.pstatus      || 'inactive',
     r.install_date || new Date(),
   ]
 );
