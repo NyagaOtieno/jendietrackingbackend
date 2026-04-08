@@ -6,8 +6,8 @@ const connection = mysql.createConnection({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  // force IPv4 if needed
-  family: 4,
+  family: 4,           // force IPv4
+  ssl: false           // disable SSL, like --skip-ssl
 });
 
 connection.connect((err) => {

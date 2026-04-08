@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
 import { testDbConnection } from './config/db.js';
-import { initQueue } from './queue/index.js';       // ← NEW
+import { initQueue } from './queue/index.js';
 
 import positionsRoutes  from './routes/positions.routes.js';
 import fleetRoutes      from './routes/fleet.routes.js';
@@ -71,17 +71,17 @@ app.use((error, _req, res, _next) => {
   res.status(500).json({ success: false, message: 'Internal server error' });
 });
 
-// Maria Sync Cron Job
+// ─── Maria Sync Cron Job ──────────────────────────────────────────────────────
 export function startMariaSyncJob() {
   if (process.env.SYNC_ENABLED !== 'true') {
-    console.log('Maria sync job disabled');
+    console.log('Maria sync job enabled');
     return;
   }
 
   let schedule = process.env.SYNC_CRON;
   if (!schedule || !/^[\d\*\/,\- ]+$/.test(schedule)) {
     console.warn('Invalid SYNC_CRON value, falling back to safe default');
-    schedule = '*/5 * * * *';
+    schedule = '*/5 * * * *'; // every 5 minutes
   }
 
   cron.schedule(schedule, async () => {
@@ -91,7 +91,9 @@ export function startMariaSyncJob() {
     }
     isRunning = true;
     try {
+      console.log('Maria sync job started');
       await runMariaSync();
+      console.log('Maria sync job completed');
     } catch (err) {
       console.error('Maria sync job failed:', err);
     } finally {
@@ -103,14 +105,13 @@ export function startMariaSyncJob() {
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-
 const PORT = process.env.PORT || 4000;
 
+// Start Maria sync cron
 startMariaSyncJob();
 
-// Initialise RabbitMQ queue before the HTTP server opens.
-// If RabbitMQ isn't available yet, connect() retries automatically —
-// the HTTP server still starts so health checks pass on Railway.
+// Initialise RabbitMQ queue before HTTP server
+// Reads RABBITMQ_URL from env (Fly secret)
 initQueue().catch(err => console.error('[Queue] Init error:', err.message));
 
 app.listen(PORT, '0.0.0.0', () => {
