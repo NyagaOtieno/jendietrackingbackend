@@ -3,27 +3,27 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { createPool } from 'mariadb';
-import { pgPool } from '../config/db.js';        // ✅ reuse shared pool — no duplicate
+import { pgPool } from '../config/db.js';
 import { publishTelemetryBatch, publishAlert } from '../queue/publisher.js';
 
 // =========================
 // MariaDB Pool
 // =========================
 const mariaPool = createPool({
-  host:             process.env.MARIA_DB_HOST,
-  port:             Number(process.env.MARIA_DB_PORT || 3306),
-  user:             process.env.MARIA_DB_USER,
-  password:         process.env.MARIA_DB_PASSWORD,
-  database:         process.env.MARIA_DB_NAME || 'uradi',
-  connectionLimit:  20,
-  acquireTimeout:   30000,
+  host:            process.env.MARIA_DB_HOST,
+  port:            Number(process.env.MARIA_DB_PORT || 3306),
+  user:            process.env.MARIA_DB_USER,
+  password:        process.env.MARIA_DB_PASSWORD,
+  database:        process.env.MARIA_DB_NAME || 'uradi',
+  connectionLimit: 20,
+  acquireTimeout:  30000,
 });
 
 // =========================
 // Config
 // =========================
-const INSERT_BATCH        = parseInt(process.env.INSERT_BATCH  || '100',  10);
-const DEVICE_CONCURRENCY  = parseInt(process.env.DEVICE_CONCURRENCY || '20', 10); // devices processed in parallel
+const INSERT_BATCH       = parseInt(process.env.INSERT_BATCH       || '100', 10);
+const DEVICE_CONCURRENCY = parseInt(process.env.DEVICE_CONCURRENCY || '20',  10);
 
 // =========================
 // Vehicles Sync
@@ -32,7 +32,7 @@ export async function syncVehicles() {
   const conn = await mariaPool.getConnection();
   try {
     const rows = await conn.query(`
-      SELECT serial, reg_no, vmodel, dealer, install_date, pstatus
+      SELECT serial, reg_no, vmodel, install_date, pstatus
       FROM registration
     `);
 
@@ -40,24 +40,24 @@ export async function syncVehicles() {
       const serialKey = r.serial ? `0${r.serial}` : null;
       if (!serialKey) continue;
 
- await pgPool.query(
-  `INSERT INTO vehicles
-     (serial, plate_number, unit_name, model, status, created_at)
-   VALUES ($1, $2, $3, $4, $5, $6)
-   ON CONFLICT (plate_number) DO UPDATE SET
-     serial    = EXCLUDED.serial,
-     unit_name = EXCLUDED.unit_name,
-     model     = EXCLUDED.model,
-     status    = EXCLUDED.status`,
-  [
-    serialKey,
-    r.reg_no       || '',
-    `Unit ${serialKey}`,
-    r.vmodel       || '',
-    r.pstatus      || 'inactive',
-    r.install_date || new Date(),
-  ]
-);
+      await pgPool.query(
+        `INSERT INTO vehicles
+           (serial, plate_number, unit_name, model, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (plate_number) DO UPDATE SET
+           serial    = EXCLUDED.serial,
+           unit_name = EXCLUDED.unit_name,
+           model     = EXCLUDED.model,
+           status    = EXCLUDED.status`,
+        [
+          serialKey,
+          r.reg_no       || '',
+          `Unit ${serialKey}`,
+          r.vmodel       || '',
+          r.pstatus      || 'inactive',
+          r.install_date || new Date(),
+        ]
+      );
     }
 
     console.log(`✅ Vehicles synced: ${rows.length}`);
@@ -67,16 +67,49 @@ export async function syncVehicles() {
 }
 
 // =========================
-// Per-device Telemetry Sync
+// Devices Sync
 // =========================
-async function syncDeviceTelemetry(deviceId, uniqueId) {
+export async function syncDevices() {
   const conn = await mariaPool.getConnection();
   try {
-    // Get the last synced timestamp from Postgres for this device
-   const lastSyncedRes = await pgPool.query(
-  `SELECT MAX(received_at) AS last_synced FROM telemetry WHERE device_id = $1`,
-  [deviceId]
-);
+    const rows = await conn.query(`
+      SELECT serial, reg_no FROM registration
+    `);
+
+    for (const r of rows) {
+      const serialKey = r.serial ? `0${r.serial}` : null;
+      if (!serialKey) continue;
+
+      await pgPool.query(
+        `INSERT INTO devices (device_uid, serial, label)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (device_uid) DO UPDATE SET
+           serial = EXCLUDED.serial,
+           label  = EXCLUDED.label`,
+        [
+          serialKey,
+          serialKey,
+          r.reg_no || serialKey,
+        ]
+      );
+    }
+
+    console.log(`✅ Devices synced: ${rows.length}`);
+  } finally {
+    conn.release();
+  }
+}
+
+// =========================
+// Per-device Telemetry Sync
+// =========================
+async function syncDeviceTelemetry(deviceId) {
+  const conn = await mariaPool.getConnection();
+  try {
+    const lastSyncedRes = await pgPool.query(
+      `SELECT MAX(received_at) AS last_synced FROM telemetry WHERE device_id = $1`,
+      [deviceId]
+    );
 
     const lastSynced = lastSyncedRes.rows[0]?.last_synced
       ? new Date(lastSyncedRes.rows[0].last_synced)
@@ -104,26 +137,23 @@ async function syncDeviceTelemetry(deviceId, uniqueId) {
 
     if (!rows.length) return 0;
 
-    // Map MariaDB rows → queue message format
-  const mapped = rows.map(e => ({
-  deviceId,
-  receivedAt:  new Date(e.servertime),
-  deviceTime:  e.devicetime ? new Date(e.devicetime) : null,
-  latitude:    Number(e.latitude)  || 0,
-  longitude:   Number(e.longitude) || 0,
-  speedKph:    e.speed  != null ? Number(e.speed)  : null,
-  heading:     e.course != null ? Number(e.course) : null,
-  alarmcode:   e.alarmcode || null,
-  hasAlert:    !!e.alarmcode,
-}));
+    const mapped = rows.map(e => ({
+      deviceId,
+      receivedAt:  new Date(e.servertime),
+      deviceTime:  e.devicetime ? new Date(e.devicetime) : null,
+      latitude:    Number(e.latitude)  || 0,
+      longitude:   Number(e.longitude) || 0,
+      speedKph:    e.speed  != null ? Number(e.speed)  : null,
+      heading:     e.course != null ? Number(e.course) : null,
+      alarmcode:   e.alarmcode || null,
+      hasAlert:    !!e.alarmcode,
+    }));
 
-    // Publish in batches to RabbitMQ — each message = INSERT_BATCH rows
     let published = 0;
     for (let i = 0; i < mapped.length; i += INSERT_BATCH) {
       const batch = mapped.slice(i, i + INSERT_BATCH);
       publishTelemetryBatch(batch);
 
-      // Publish any alarm rows as individual alerts
       for (const row of batch) {
         if (row.hasAlert) {
           publishAlert(deviceId, {
@@ -161,7 +191,6 @@ export async function syncTelemetry() {
   let totalPublished = 0;
   let offset = 0;
 
-  // Process devices in parallel chunks instead of one-by-one
   while (offset < registrations.length) {
     const chunk = registrations.slice(offset, offset + DEVICE_CONCURRENCY);
     offset += DEVICE_CONCURRENCY;
@@ -170,15 +199,14 @@ export async function syncTelemetry() {
       chunk.map(async (r) => {
         const serialKey = `0${r.serial}`;
 
-        // Resolve device ID from Postgres
-       const devRes = await pgPool.query(
-  `SELECT id FROM devices WHERE serial = $1 LIMIT 1`,
-  [serialKey]
-);
+        const devRes = await pgPool.query(
+          `SELECT id FROM devices WHERE serial = $1 LIMIT 1`,
+          [serialKey]
+        );
         if (!devRes.rows.length) return 0;
 
         const deviceId = devRes.rows[0].id;
-        const count = await syncDeviceTelemetry(deviceId, serialKey);
+        const count = await syncDeviceTelemetry(deviceId);
         if (count > 0) console.log(`📦 ${serialKey} → ${count} rows queued`);
         return count;
       })
@@ -199,6 +227,7 @@ export async function syncTelemetry() {
 export async function runMariaSync() {
   console.log('🚀 Maria Sync started');
   await syncVehicles();
+  await syncDevices();
   await syncTelemetry();
   console.log('✅ Maria Sync completed');
 }
