@@ -7,17 +7,33 @@ import { pgPool } from '../config/db.js';
 import { publishTelemetryBatch, publishAlert } from '../queue/publisher.js';
 
 // =========================
-// MariaDB Pool
+// MariaDB Pool with safer defaults
 // =========================
 const mariaPool = createPool({
-  host:            process.env.MARIA_DB_HOST,
-  port:            Number(process.env.MARIA_DB_PORT || 3306),
-  user:            process.env.MARIA_DB_USER,
-  password:        process.env.MARIA_DB_PASSWORD,
-  database:        process.env.MARIA_DB_NAME || 'uradi',
-  connectionLimit: 20,
-  acquireTimeout:  30000,
+  host:            process.env.MARIADB_HOST || 'localhost',
+  port:            Number(process.env.MARIADB_PORT || 3306),
+  user:            process.env.MARIADB_USER || 'root',
+  password:        process.env.MARIADB_PASSWORD || '',
+  database:        process.env.MARIADB_DB || 'uradi',
+  connectionLimit: 10,          // slightly lower to reduce overload
+  acquireTimeout:  60000,       // 60s timeout for acquiring a connection
+  connectTimeout:  10000,       // 10s timeout for initial connection
+  enableKeepAlive: true,        // keep sockets alive to avoid dropped connections
+  keepAliveInitialDelay: 10000, // start keep-alive after 10s
 });
+
+// Helper to retry connection on failure
+async function getMariaConnection(retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await mariaPool.getConnection();
+    } catch (err) {
+      console.warn(`⚠️ MariaDB connection attempt ${i + 1} failed:`, err.code);
+      if (i === retries - 1) throw err;
+      await new Promise(res => setTimeout(res, 2000)); // wait 2s before retry
+    }
+  }
+}
 
 // =========================
 // Config
@@ -29,7 +45,7 @@ const DEVICE_CONCURRENCY = parseInt(process.env.DEVICE_CONCURRENCY || '20',  10)
 // Vehicles Sync
 // =========================
 export async function syncVehicles() {
-  const conn = await mariaPool.getConnection();
+  const conn = await getMariaConnection();
   try {
     const rows = await conn.query(`
       SELECT serial, reg_no, vmodel, install_date, pstatus
@@ -44,14 +60,14 @@ export async function syncVehicles() {
         `INSERT INTO vehicles
            (serial, plate_number, unit_name, model, status, created_at)
          VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (plate_number) DO UPDATE SET
-           serial    = EXCLUDED.serial,
-           unit_name = EXCLUDED.unit_name,
-           model     = EXCLUDED.model,
-           status    = EXCLUDED.status`,
+         ON CONFLICT (serial) DO UPDATE SET
+           plate_number = EXCLUDED.plate_number,
+           unit_name    = EXCLUDED.unit_name,
+           model        = EXCLUDED.model,
+           status       = EXCLUDED.status`,
         [
           serialKey,
-          r.reg_no       || '',
+          r.reg_no       || `PLATE_${serialKey}`,
           `Unit ${serialKey}`,
           r.vmodel       || '',
           r.pstatus      || 'inactive',
@@ -70,11 +86,9 @@ export async function syncVehicles() {
 // Devices Sync
 // =========================
 export async function syncDevices() {
-  const conn = await mariaPool.getConnection();
+  const conn = await getMariaConnection();
   try {
-    const rows = await conn.query(`
-      SELECT serial, reg_no FROM registration
-    `);
+    const rows = await conn.query(`SELECT serial, reg_no FROM registration`);
 
     for (const r of rows) {
       const serialKey = r.serial ? `0${r.serial}` : null;
@@ -86,11 +100,7 @@ export async function syncDevices() {
          ON CONFLICT (device_uid) DO UPDATE SET
            serial = EXCLUDED.serial,
            label  = EXCLUDED.label`,
-        [
-          serialKey,
-          serialKey,
-          r.reg_no || serialKey,
-        ]
+        [serialKey, serialKey, r.reg_no || serialKey]
       );
     }
 
@@ -104,7 +114,7 @@ export async function syncDevices() {
 // Per-device Telemetry Sync
 // =========================
 async function syncDeviceTelemetry(deviceId) {
-  const conn = await mariaPool.getConnection();
+  const conn = await getMariaConnection();
   try {
     const lastSyncedRes = await pgPool.query(
       `SELECT MAX(received_at) AS last_synced FROM telemetry WHERE device_id = $1`,
@@ -115,10 +125,7 @@ async function syncDeviceTelemetry(deviceId) {
       ? new Date(lastSyncedRes.rows[0].last_synced)
       : new Date(0);
 
-    const lastSyncedMaria = lastSynced
-      .toISOString()
-      .slice(0, 19)
-      .replace('T', ' ');
+    const lastSyncedMaria = lastSynced.toISOString().slice(0, 19).replace('T', ' ');
 
     const rows = await conn.query(
       `SELECT
@@ -177,7 +184,7 @@ async function syncDeviceTelemetry(deviceId) {
 // Telemetry Sync — Parallel
 // =========================
 export async function syncTelemetry() {
-  const conn = await mariaPool.getConnection();
+  const conn = await getMariaConnection();
   let registrations;
 
   try {
