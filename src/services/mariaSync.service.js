@@ -10,16 +10,16 @@ import { publishTelemetryBatch, publishAlert } from '../queue/publisher.js';
 // MariaDB Pool with safer defaults
 // =========================
 const mariaPool = createPool({
-  host:            process.env.MARIADB_HOST || 'localhost',
-  port:            Number(process.env.MARIADB_PORT || 3306),
-  user:            process.env.MARIADB_USER || 'root',
-  password:        process.env.MARIADB_PASSWORD || '',
-  database:        process.env.MARIADB_DB || 'uradi',
-  connectionLimit: 10,          // slightly lower to reduce overload
-  acquireTimeout:  60000,       // 60s timeout for acquiring a connection
-  connectTimeout:  10000,       // 10s timeout for initial connection
-  enableKeepAlive: true,        // keep sockets alive to avoid dropped connections
-  keepAliveInitialDelay: 10000, // start keep-alive after 10s
+  host:            process.env.MARIA_DB_HOST,
+  port:            Number(process.env.MARIA_DB_PORT || 3306),
+  user:            process.env.MARIA_DB_USER,
+  password:        process.env.MARIA_DB_PASSWORD,
+  database:        process.env.MARIA_DB_NAME || 'uradi',
+  connectionLimit: 20,
+  acquireTimeout:  30000,
+  // ← add these two:
+  socketTimeout:   30000,
+  compress:        false,
 });
 
 // Helper to retry connection on failure
