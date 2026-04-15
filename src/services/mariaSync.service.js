@@ -42,72 +42,41 @@ const DEVICE_CONCURRENCY = parseInt(process.env.DEVICE_CONCURRENCY || '20',  10)
 // =========================
 // Vehicles Sync
 // =========================
-export async function syncVehicles() {
+export async function syncDevices() {
   const conn = await getMariaConnection();
 
   try {
     const rows = await conn.query(`
-      SELECT serial, reg_no, vmodel, install_date, pstatus
-      FROM registration
+      SELECT id, uniqueid, positionid
+      FROM device
     `);
 
     for (const r of rows) {
-      if (!r.serial) continue;
+      if (!r.uniqueid) continue;
 
-      const serialKey = `0${r.serial}`;
-      const plate = (r.reg_no || `PLATE_${serialKey}`).trim();
-
-      // 1️⃣ FORCE CONSISTENCY: remove wrong plate → serial mismatch
       await pgPool.query(
         `
-        DELETE FROM vehicles
-        WHERE plate_number = $1
-        AND serial IS DISTINCT FROM $2
-        `,
-        [plate, serialKey]
-      );
-
-      // 2️⃣ ENSURE SERIAL UNIQUENESS SAFETY
-      await pgPool.query(
-        `
-        DELETE FROM vehicles
-        WHERE serial = $1
-        AND plate_number IS DISTINCT FROM $2
-        `,
-        [serialKey, plate]
-      );
-
-      // 3️⃣ UPSERT (TRUE SOURCE OF TRUTH = SERIAL)
-      await pgPool.query(
-        `
-        INSERT INTO vehicles
-          (serial, plate_number, unit_name, model, status, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (serial)
-        DO UPDATE SET
-          plate_number = EXCLUDED.plate_number,
-          unit_name    = EXCLUDED.unit_name,
-          model        = EXCLUDED.model,
-          status       = EXCLUDED.status,
-          created_at   = EXCLUDED.created_at
+        INSERT INTO devices (device_uid, serial, label, positionid)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (device_uid) DO UPDATE SET
+          serial = EXCLUDED.serial,
+          label = EXCLUDED.label,
+          positionid = EXCLUDED.positionid
         `,
         [
-          serialKey,
-          plate,
-          `Unit ${serialKey}`,
-          r.vmodel || '',
-          r.pstatus || 'inactive',
-          r.install_date || new Date(),
+          r.uniqueid,
+          r.uniqueid,
+          `Device ${r.uniqueid}`,
+          r.positionid || 0
         ]
       );
     }
 
-    console.log(`✅ Vehicles synced safely + enforced uniqueness: ${rows.length}`);
+    console.log(`✅ Devices synced with positionid`);
   } finally {
     conn.release();
   }
 }
-
 // =========================
 // Devices Sync
 // =========================
@@ -139,68 +108,76 @@ export async function syncDevices() {
 // =========================
 // Per-device Telemetry Sync
 // =========================
-async function syncDeviceTelemetry(deviceId) {
+async function syncDeviceTelemetry(device) {
   const conn = await getMariaConnection();
+
   try {
-    const lastSyncedRes = await pgPool.query(
-      `SELECT MAX(received_at) AS last_synced FROM telemetry WHERE device_id = $1`,
-      [deviceId]
-    );
-
-    const lastSynced = lastSyncedRes.rows[0]?.last_synced
-      ? new Date(lastSyncedRes.rows[0].last_synced)
-      : new Date(0);
-
-    const lastSyncedMaria = lastSynced.toISOString().slice(0, 19).replace('T', ' ');
+    const deviceUid = device.serial;        // uniqueid
+    const lastPositionId = device.positionid || 0;
 
     const rows = await conn.query(
-      `SELECT
-         protocol, deviceid, servertime, devicetime, fixtime,
-         valid, latitude, longitude, altitude, speed, course,
-         address, attributes, accuracy, network, statuscode,
-         alarmcode, speedlimit, odometer, isRead,
-         signalwireconnected, powerwireconnected, eactime
-       FROM eventData
-       WHERE deviceid = ?
-         AND servertime > ?
-       ORDER BY servertime ASC
-       LIMIT 5000`,
-      [deviceId, lastSyncedMaria]
+      `
+      SELECT
+        id,
+        deviceid,
+        servertime,
+        devicetime,
+        latitude,
+        longitude,
+        speed,
+        course,
+        alarmcode
+      FROM eventData
+      WHERE deviceid = (
+        SELECT id FROM device WHERE uniqueid = ?
+      )
+      AND id > ?
+      ORDER BY id ASC
+      LIMIT 5000
+      `,
+      [deviceUid, lastPositionId]
     );
 
-    if (!rows.length) return 0;
+    if (!rows.length) return { count: 0, maxId: lastPositionId };
 
     const mapped = rows.map(e => ({
-      deviceId,
-      receivedAt:  new Date(e.servertime),
-      deviceTime:  e.devicetime ? new Date(e.devicetime) : null,
-      latitude:    Number(e.latitude)  || 0,
-      longitude:   Number(e.longitude) || 0,
-      speedKph:    e.speed  != null ? Number(e.speed)  : null,
-      heading:     e.course != null ? Number(e.course) : null,
-      alarmcode:   e.alarmcode || null,
-      hasAlert:    !!e.alarmcode,
+      deviceId: deviceUid,
+      receivedAt: new Date(e.servertime),
+      deviceTime: e.devicetime ? new Date(e.devicetime) : null,
+      latitude: Number(e.latitude),
+      longitude: Number(e.longitude),
+      speedKph: e.speed,
+      heading: e.course,
+      alarmcode: e.alarmcode || null,
+      hasAlert: !!e.alarmcode,
     }));
 
-    let published = 0;
+    let maxEventId = lastPositionId;
+
+    for (const r of rows) {
+      if (r.id > maxEventId) maxEventId = r.id;
+    }
+
     for (let i = 0; i < mapped.length; i += INSERT_BATCH) {
       const batch = mapped.slice(i, i + INSERT_BATCH);
       publishTelemetryBatch(batch);
 
       for (const row of batch) {
         if (row.hasAlert) {
-          publishAlert(deviceId, {
-            type:     'alarm',
+          publishAlert(deviceUid, {
+            type: 'alarm',
             severity: 'warning',
-            message:  `Alarm code: ${row.alarmcode}`,
+            message: `Alarm code: ${row.alarmcode}`,
           });
         }
       }
-
-      published += batch.length;
     }
 
-    return published;
+    return {
+      count: mapped.length,
+      maxId: maxEventId
+    };
+
   } finally {
     conn.release();
   }
@@ -211,47 +188,58 @@ async function syncDeviceTelemetry(deviceId) {
 // =========================
 export async function syncTelemetry() {
   const conn = await getMariaConnection();
-  let registrations;
+
+  let devices;
 
   try {
-    registrations = await conn.query('SELECT serial FROM registration');
+    devices = await pgPool.query(`
+      SELECT id, serial, positionid
+      FROM devices
+    `);
   } finally {
     conn.release();
   }
 
-  console.log(`🔄 Syncing telemetry for ${registrations.length} devices (${DEVICE_CONCURRENCY} parallel)...`);
+  console.log(`🔄 Syncing telemetry for ${devices.rows.length} devices`);
 
-  let totalPublished = 0;
+  let total = 0;
+
+  const chunkSize = DEVICE_CONCURRENCY;
   let offset = 0;
 
-  while (offset < registrations.length) {
-    const chunk = registrations.slice(offset, offset + DEVICE_CONCURRENCY);
-    offset += DEVICE_CONCURRENCY;
+  while (offset < devices.rows.length) {
+    const chunk = devices.rows.slice(offset, offset + chunkSize);
+    offset += chunkSize;
 
     const results = await Promise.allSettled(
-      chunk.map(async (r) => {
-        const serialKey = `0${r.serial}`;
+      chunk.map(async (d) => {
+        const res = await syncDeviceTelemetry({
+          serial: d.serial,
+          positionid: d.positionid
+        });
 
-        const devRes = await pgPool.query(
-          `SELECT id FROM devices WHERE serial = $1 LIMIT 1`,
-          [serialKey]
-        );
-        if (!devRes.rows.length) return 0;
+        if (res.count > 0) {
+          total += res.count;
 
-        const deviceId = devRes.rows[0].id;
-        const count = await syncDeviceTelemetry(deviceId);
-        if (count > 0) console.log(`📦 ${serialKey} → ${count} rows queued`);
-        return count;
+          // 🔥 UPDATE CURSOR BACK TO POSTGRES
+          await pgPool.query(
+            `UPDATE devices SET positionid = $1 WHERE serial = $2`,
+            [res.maxId, d.serial]
+          );
+        }
+
+        return res.count;
       })
     );
 
     for (const r of results) {
-      if (r.status === 'fulfilled') totalPublished += r.value;
-      else console.error('❌ Device sync error:', r.reason?.message);
+      if (r.status === 'rejected') {
+        console.error('❌ Sync error:', r.reason?.message);
+      }
     }
   }
 
-  console.log(`✅ Telemetry sync complete — ${totalPublished} rows published to queue`);
+  console.log(`✅ Telemetry sync complete — ${total}`);
 }
 
 // =========================
