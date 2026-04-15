@@ -17,9 +17,7 @@ const mariaPool = createPool({
   database:        process.env.MARIA_DB_NAME || 'uradi',
   connectionLimit: 20,
   acquireTimeout:  30000,
-  // ← add these two:
-  socketTimeout:   30000,
-  compress:        false,
+  socketPath:      undefined,
 });
 
 // Helper to retry connection on failure
@@ -46,6 +44,7 @@ const DEVICE_CONCURRENCY = parseInt(process.env.DEVICE_CONCURRENCY || '20',  10)
 // =========================
 export async function syncVehicles() {
   const conn = await getMariaConnection();
+
   try {
     const rows = await conn.query(`
       SELECT serial, reg_no, vmodel, install_date, pstatus
@@ -56,6 +55,17 @@ export async function syncVehicles() {
       const serialKey = r.serial ? `0${r.serial}` : null;
       if (!serialKey) continue;
 
+      const plate = r.reg_no || `PLATE_${serialKey}`;
+
+      // 🔥 STEP 1: Remove WRONG duplicate plate_number (linked to different serial)
+      await pgPool.query(
+        `DELETE FROM vehicles
+         WHERE plate_number = $1
+         AND serial <> $2`,
+        [plate, serialKey]
+      );
+
+      // 🔥 STEP 2: UPSERT safely
       await pgPool.query(
         `INSERT INTO vehicles
            (serial, plate_number, unit_name, model, status, created_at)
@@ -67,7 +77,7 @@ export async function syncVehicles() {
            status       = EXCLUDED.status`,
         [
           serialKey,
-          r.reg_no       || `PLATE_${serialKey}`,
+          plate,
           `Unit ${serialKey}`,
           r.vmodel       || '',
           r.pstatus      || 'inactive',
@@ -76,7 +86,7 @@ export async function syncVehicles() {
       );
     }
 
-    console.log(`✅ Vehicles synced: ${rows.length}`);
+    console.log(`✅ Vehicles synced (clean + deduplicated): ${rows.length}`);
   } finally {
     conn.release();
   }
