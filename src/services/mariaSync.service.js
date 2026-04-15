@@ -52,41 +52,57 @@ export async function syncVehicles() {
     `);
 
     for (const r of rows) {
-      const serialKey = r.serial ? `0${r.serial}` : null;
-      if (!serialKey) continue;
+      if (!r.serial) continue;
 
-      const plate = r.reg_no || `PLATE_${serialKey}`;
+      const serialKey = `0${r.serial}`;
+      const plate = (r.reg_no || `PLATE_${serialKey}`).trim();
 
-      // 🔥 STEP 1: Remove WRONG duplicate plate_number (linked to different serial)
+      // 1️⃣ FORCE CONSISTENCY: remove wrong plate → serial mismatch
       await pgPool.query(
-        `DELETE FROM vehicles
-         WHERE plate_number = $1
-         AND serial <> $2`,
+        `
+        DELETE FROM vehicles
+        WHERE plate_number = $1
+        AND serial IS DISTINCT FROM $2
+        `,
         [plate, serialKey]
       );
 
-      // 🔥 STEP 2: UPSERT safely
+      // 2️⃣ ENSURE SERIAL UNIQUENESS SAFETY
       await pgPool.query(
-        `INSERT INTO vehicles
-           (serial, plate_number, unit_name, model, status, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (serial) DO UPDATE SET
-           plate_number = EXCLUDED.plate_number,
-           unit_name    = EXCLUDED.unit_name,
-           model        = EXCLUDED.model,
-           status       = EXCLUDED.status`,
+        `
+        DELETE FROM vehicles
+        WHERE serial = $1
+        AND plate_number IS DISTINCT FROM $2
+        `,
+        [serialKey, plate]
+      );
+
+      // 3️⃣ UPSERT (TRUE SOURCE OF TRUTH = SERIAL)
+      await pgPool.query(
+        `
+        INSERT INTO vehicles
+          (serial, plate_number, unit_name, model, status, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (serial)
+        DO UPDATE SET
+          plate_number = EXCLUDED.plate_number,
+          unit_name    = EXCLUDED.unit_name,
+          model        = EXCLUDED.model,
+          status       = EXCLUDED.status,
+          created_at   = EXCLUDED.created_at
+        `,
         [
           serialKey,
           plate,
           `Unit ${serialKey}`,
-          r.vmodel       || '',
-          r.pstatus      || 'inactive',
+          r.vmodel || '',
+          r.pstatus || 'inactive',
           r.install_date || new Date(),
         ]
       );
     }
 
-    console.log(`✅ Vehicles synced (clean + deduplicated): ${rows.length}`);
+    console.log(`✅ Vehicles synced safely + enforced uniqueness: ${rows.length}`);
   } finally {
     conn.release();
   }
