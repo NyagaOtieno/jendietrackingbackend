@@ -108,30 +108,38 @@ export function startMariaSyncJob() {
     schedule = '*/5 * * * *';
   }
 
-  cron.schedule(schedule, async () => {
-    if (isRunning) {
-      console.log('Maria sync skipped: previous run still in progress');
+  let lastRunAt = null;
+
+cron.schedule(schedule, async () => {
+  const now = Date.now();
+
+  // 🔒 Prevent overlap + recover stuck jobs
+  if (isRunning) {
+    const diff = lastRunAt ? now - lastRunAt : 0;
+
+    if (diff > 5 * 60 * 1000) {
+      console.warn('⚠️ Previous sync stuck, resetting lock...');
+      isRunning = false;
+    } else {
+      console.log('⏳ Maria sync skipped: previous run still in progress');
       return;
     }
+  }
 
-    isRunning = true;
+  isRunning = true;
+  lastRunAt = now;
 
-    const timeout = setTimeout(() => {
-      console.warn('Maria sync timeout exceeded');
-      isRunning = false;
-    }, 4 * 60 * 1000); // 4 minutes safety
-
-    try {
-      console.log('Maria sync job started');
-      await runMariaSync();
-      console.log('Maria sync job completed');
-    } catch (err) {
-      console.error('Maria sync job failed:', err);
-    } finally {
-      clearTimeout(timeout);
-      isRunning = false;
-    }
-  });
+  try {
+    console.log('🚀 Maria Sync started');
+    await runMariaSync();
+    console.log('✅ Maria Sync completed');
+  } catch (err) {
+    console.error('❌ Maria Sync failed:', err.message);
+  } finally {
+    isRunning = false;
+    lastRunAt = null;
+  }
+});
 
   console.log(`Maria sync job scheduled: ${schedule}`);
 }
