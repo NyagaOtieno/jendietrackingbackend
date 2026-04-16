@@ -1,5 +1,7 @@
 // src/server.js
 import dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
 import cron from 'node-cron';
@@ -11,6 +13,7 @@ import { testDbConnection } from './config/db.js';
 import { initQueue } from './queue/index.js';
 import { runMariaSync } from './services/mariaSync.service.js';
 
+// routes
 import positionsRoutes from './routes/positions.routes.js';
 import fleetRoutes from './routes/fleet.routes.js';
 import authRoutes from './routes/auth.routes.js';
@@ -21,32 +24,35 @@ import vehiclesRoutes from './routes/vehicles.routes.js';
 import syncRoutes from './routes/sync.routes.js';
 import telemetryRoutes from './routes/telemetry.routes.js';
 
-dotenv.config();
-
 const app = express();
 
-// =========================
-// HTTP SERVER (REQUIRED FOR WS)
-// =========================
+/**
+ * =========================
+ * HTTP + WS SERVER
+ * =========================
+ */
 const server = http.createServer(app);
+const io = initWebSocket(server); // ✅ SINGLE INIT ONLY
 
-// =========================
-// WEBSOCKET INIT (REALTIME LAYER)
-// =========================
-const ws = initWebSocket(server);
+/**
+ * expose globally for services (safe pattern)
+ */
+global.io = io;
 
-// =========================
-// GLOBAL SAFETY LOCKS
-// =========================
+/**
+ * =========================
+ * SAFETY LOCKS
+ * =========================
+ */
 let isRunning = false;
 let cronStarted = false;
-
-// process-wide PM2 safety
 global.__MARIASYNC_RUNNING__ = global.__MARIASYNC_RUNNING__ || false;
 
-// =========================
-// CORS
-// =========================
+/**
+ * =========================
+ * CORS
+ * =========================
+ */
 app.use(
   cors({
     origin: process.env.FRONTEND_ORIGIN
@@ -56,9 +62,11 @@ app.use(
   })
 );
 
-// =========================
-// MIDDLEWARE
-// =========================
+/**
+ * =========================
+ * MIDDLEWARE
+ * =========================
+ */
 app.use(express.json());
 
 app.use((req, _res, next) => {
@@ -66,36 +74,34 @@ app.use((req, _res, next) => {
   next();
 });
 
-// =========================
-// HEALTH CHECK
-// =========================
+/**
+ * =========================
+ * HEALTH
+ * =========================
+ */
 app.get('/health', async (_req, res) => {
   try {
     await testDbConnection();
-    return res.status(200).json({
-      success: true,
-      message: 'Backend is running',
-      database: 'up',
-    });
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: 'Backend is running',
-      database: 'down',
-    });
+    res.json({ success: true, database: 'up' });
+  } catch {
+    res.status(500).json({ success: false, database: 'down' });
   }
 });
 
-// =========================
-// ROOT
-// =========================
+/**
+ * =========================
+ * ROOT
+ * =========================
+ */
 app.get('/', (_req, res) => {
   res.send('🚀 Jendie Tracking Backend is running');
 });
 
-// =========================
-// ROUTES (UNCHANGED)
-// =========================
+/**
+ * =========================
+ * ROUTES
+ * =========================
+ */
 app.use('/api/auth', authRoutes);
 app.use('/api/seed', seedRoutes);
 app.use('/api/accounts', accountsRoutes);
@@ -106,9 +112,11 @@ app.use('/api/vehicles', vehiclesRoutes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/telemetry', telemetryRoutes);
 
-// =========================
-// 404
-// =========================
+/**
+ * =========================
+ * 404
+ * =========================
+ */
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -116,9 +124,11 @@ app.use((req, res) => {
   });
 });
 
-// =========================
-// ERROR HANDLER
-// =========================
+/**
+ * =========================
+ * ERROR HANDLER
+ * =========================
+ */
 app.use((error, _req, res, _next) => {
   console.error('❌ Unhandled error:', error);
   res.status(500).json({
@@ -127,29 +137,28 @@ app.use((error, _req, res, _next) => {
   });
 });
 
-// =========================
-// SAFE CRON JOB
-// =========================
+/**
+ * =========================
+ * CRON JOB (SAFE SINGLE RUN)
+ * =========================
+ */
 export function startMariaSyncJob() {
   if (cronStarted) return;
 
   if (process.env.SYNC_ENABLED !== 'true') {
-    console.log('⛔ Maria sync disabled via ENV');
+    console.log('⛔ Maria sync disabled');
     return;
   }
 
   cronStarted = true;
 
-  const schedule =
-    process.env.SYNC_CRON && /^[\d\*\/,\- ]+$/.test(process.env.SYNC_CRON)
-      ? process.env.SYNC_CRON
-      : '*/5 * * * *';
+  const schedule = process.env.SYNC_CRON || '*/5 * * * *';
 
   console.log(`📦 Maria sync scheduled: ${schedule}`);
 
   cron.schedule(schedule, async () => {
     if (isRunning || global.__MARIASYNC_RUNNING__) {
-      console.log('⏳ Sync skipped (already running globally)');
+      console.log('⏳ Sync skipped (already running)');
       return;
     }
 
@@ -158,7 +167,7 @@ export function startMariaSyncJob() {
 
     try {
       console.log('🚀 Maria Sync started');
-      await runMariaSync();
+      await runMariaSync(io); // ⚡ PASS IO INTO SYNC (IMPORTANT)
       console.log('✅ Maria Sync completed');
     } catch (err) {
       console.error('❌ Maria Sync failed:', err.message);
@@ -169,9 +178,11 @@ export function startMariaSyncJob() {
   });
 }
 
-// =========================
-// GRACEFUL SHUTDOWN (INCLUDING WS)
-// =========================
+/**
+ * =========================
+ * GRACEFUL SHUTDOWN
+ * =========================
+ */
 process.on('SIGINT', () => {
   console.log('🛑 SIGINT received');
   server.close(() => process.exit(0));
@@ -182,9 +193,11 @@ process.on('SIGTERM', () => {
   server.close(() => process.exit(0));
 });
 
-// =========================
-// START SERVER
-// =========================
+/**
+ * =========================
+ * START SERVER
+ * =========================
+ */
 const PORT = process.env.PORT || 4000;
 
 async function startServer() {
@@ -193,25 +206,18 @@ async function startServer() {
       await testDbConnection();
       console.log('✅ Database connected');
     } catch (err) {
-      console.log('⚠️ DB connection failed but continuing:', err.message);
+      console.log('⚠️ DB failed but continuing');
     }
+
+    await initQueue().catch(err =>
+      console.log('⚠️ Queue init failed:', err.message)
+    );
 
     startMariaSyncJob();
 
-    try {
-      await initQueue();
-      console.log('✅ Queue initialized');
-    } catch (err) {
-      console.log('⚠️ Queue init failed:', err.message);
-    }
-   
-    // init websocket
-initWebSocket(server);
-
-    // START HTTP + WS SERVER (IMPORTANT)
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Backend running on port ${PORT}`);
-      console.log(`⚡ WebSocket enabled for real-time tracking`);
+      console.log(`⚡ WebSocket enabled`);
     });
 
   } catch (err) {

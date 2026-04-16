@@ -7,6 +7,8 @@ import { pgPool } from '../config/db.js';
 import { publishTelemetryBatch, publishAlert } from '../queue/publisher.js';
 import { getIO } from '../socket/server.js';
 import { setLatestPosition } from '../services/cache.service.js';
+import http from 'http';
+import { initWebSocket } from './socket/server.js';
 
 // =========================
 // GLOBAL LOCK (PROCESS LEVEL)

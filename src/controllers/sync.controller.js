@@ -1,8 +1,8 @@
-import { runMariaSync, isSyncRunning } from "../services/mariaSync.service.js";
+import { runMariaSync } from "../services/mariaSync.service.js";
 
-export async function triggerMariaSync(_req, res) {
+export async function triggerMariaSync(req, res) {
   try {
-    if (isSyncRunning) {
+    if (global.__MARIASYNC_RUNNING__) {
       return res.status(429).json({
         success: false,
         message: "Sync already running",
@@ -15,16 +15,10 @@ export async function triggerMariaSync(_req, res) {
 
     return res.json({
       success: true,
-      message: "Maria sync completed",
-      duration: `${((Date.now() - start) / 1000).toFixed(2)}s`,
+      duration: `${(Date.now() - start) / 1000}s`,
     });
 
-  } catch (error) {
-    console.error("❌ Maria sync failed:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 }
