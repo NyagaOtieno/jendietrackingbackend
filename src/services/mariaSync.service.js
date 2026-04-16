@@ -1,3 +1,4 @@
+// src/services/mariaSync.service.js
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -6,27 +7,13 @@ import { pgPool } from '../config/db.js';
 import { publishTelemetryBatch, publishAlert } from '../queue/publisher.js';
 
 // =========================
-// 🔒 IN-PROCESS LOCK (PM2 SINGLE INSTANCE SAFETY)
+// GLOBAL LOCK (PROCESS LEVEL)
 // =========================
 let isSyncRunning = false;
-export { isSyncRunning }; // ✅ FIX: allow controller import
+export { isSyncRunning }; // ✅ FIX: export it (your controller needs this)
 
 // =========================
-// 🔒 DISTRIBUTED LOCK (MULTI INSTANCE SAFETY)
-// =========================
-async function acquireLock() {
-  const res = await pgPool.query(
-    `SELECT pg_try_advisory_lock(778899) AS locked`
-  );
-  return res.rows[0].locked;
-}
-
-async function releaseLock() {
-  await pgPool.query(`SELECT pg_advisory_unlock(778899)`);
-}
-
-// =========================
-// MariaDB Pool
+// MARIA DB POOL
 // =========================
 const mariaPool = createPool({
   host: process.env.MARIA_DB_HOST,
@@ -45,14 +32,28 @@ const INSERT_BATCH = Number(process.env.INSERT_BATCH || 100);
 const DEVICE_CONCURRENCY = Number(process.env.DEVICE_CONCURRENCY || 20);
 
 // =========================
-// Connection helper
+// POSTGRES DISTRIBUTED LOCK (MULTI-SERVER SAFE)
+// =========================
+async function acquireLock() {
+  const res = await pgPool.query(
+    `SELECT pg_try_advisory_lock(778899) AS locked`
+  );
+  return res.rows[0].locked;
+}
+
+async function releaseLock() {
+  await pgPool.query(`SELECT pg_advisory_unlock(778899)`);
+}
+
+// =========================
+// CONNECTION HELPER
 // =========================
 async function getMariaConnection(retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
       return await mariaPool.getConnection();
     } catch (err) {
-      console.warn(`⚠️ MariaDB retry ${i + 1}`, err.code);
+      console.warn(`⚠️ MariaDB retry ${i + 1}`);
       if (i === retries - 1) throw err;
       await new Promise(r => setTimeout(r, 2000));
     }
@@ -60,7 +61,7 @@ async function getMariaConnection(retries = 3) {
 }
 
 // =========================
-// 1️⃣ VEHICLES SYNC (SAFE UPSERT + NO DUPLICATE CRASH)
+// VEHICLES SYNC
 // =========================
 export async function syncVehicles() {
   const conn = await getMariaConnection();
@@ -79,8 +80,7 @@ export async function syncVehicles() {
         .trim()
         .substring(0, 100);
 
-      await pgPool.query(
-        `
+      await pgPool.query(`
         INSERT INTO vehicles
           (serial, plate_number, unit_name, model, status, created_at)
         VALUES ($1,$2,$3,$4,$5,$6)
@@ -90,16 +90,14 @@ export async function syncVehicles() {
           unit_name    = EXCLUDED.unit_name,
           model        = EXCLUDED.model,
           status       = EXCLUDED.status
-        `,
-        [
-          serialKey,
-          plate,
-          `Unit ${serialKey}`,
-          r.vmodel || '',
-          r.pstatus || 'inactive',
-          r.install_date || new Date(),
-        ]
-      );
+      `, [
+        serialKey,
+        plate,
+        `Unit ${serialKey}`,
+        r.vmodel || '',
+        r.pstatus || 'inactive',
+        r.install_date || new Date()
+      ]);
     }
 
     console.log(`✅ Vehicles synced: ${rows.length}`);
@@ -109,7 +107,7 @@ export async function syncVehicles() {
 }
 
 // =========================
-// 2️⃣ DEVICES SYNC
+// DEVICES SYNC
 // =========================
 export async function syncDevices() {
   const conn = await getMariaConnection();
@@ -123,17 +121,18 @@ export async function syncDevices() {
     for (const r of rows) {
       if (!r.uniqueid) continue;
 
-      await pgPool.query(
-        `
+      await pgPool.query(`
         INSERT INTO devices (device_uid, serial, positionid)
         VALUES ($1,$2,$3)
         ON CONFLICT (device_uid)
         DO UPDATE SET
-          serial     = EXCLUDED.serial,
-          positionid = EXCLUDED.positionid
-        `,
-        [r.uniqueid, r.uniqueid, r.positionid || 0]
-      );
+          serial      = EXCLUDED.serial,
+          positionid  = EXCLUDED.positionid
+      `, [
+        r.uniqueid,
+        r.uniqueid,
+        r.positionid || 0
+      ]);
     }
 
     console.log(`✅ Devices synced: ${rows.length}`);
@@ -143,7 +142,7 @@ export async function syncDevices() {
 }
 
 // =========================
-// 3️⃣ TELEMETRY PER DEVICE
+// TELEMETRY PER DEVICE
 // =========================
 async function syncDeviceTelemetry(device) {
   const conn = await getMariaConnection();
@@ -152,8 +151,7 @@ async function syncDeviceTelemetry(device) {
     const deviceUid = device.device_uid;
     const lastPositionId = device.positionid || 0;
 
-    const rows = await conn.query(
-      `
+    const rows = await conn.query(`
       SELECT positionid, servertime, devicetime,
              latitude, longitude, speed, course, alarmcode
       FROM eventData
@@ -163,9 +161,7 @@ async function syncDeviceTelemetry(device) {
       AND positionid > ?
       ORDER BY positionid ASC
       LIMIT 5000
-      `,
-      [deviceUid, lastPositionId]
-    );
+    `, [deviceUid, lastPositionId]);
 
     if (!rows.length) {
       return { count: 0, maxPositionId: lastPositionId };
@@ -208,75 +204,69 @@ async function syncDeviceTelemetry(device) {
     }
 
     return { count: mapped.length, maxPositionId };
+
   } finally {
     conn.release();
   }
 }
 
 // =========================
-// 4️⃣ TELEMETRY ORCHESTRATOR
+// TELEMETRY ORCHESTRATOR
 // =========================
 export async function syncTelemetry() {
-  const result = await pgPool.query(`
-    SELECT device_uid, positionid
-    FROM devices
+  const { rows: devices } = await pgPool.query(`
+    SELECT device_uid, positionid FROM devices
   `);
-
-  const devices = result.rows;
 
   console.log(`🔄 Syncing telemetry for ${devices.length} devices`);
 
   let total = 0;
-  let offset = 0;
 
-  while (offset < devices.length) {
-    const chunk = devices.slice(offset, offset + DEVICE_CONCURRENCY);
-    offset += DEVICE_CONCURRENCY;
+  for (let i = 0; i < devices.length; i += DEVICE_CONCURRENCY) {
+    const chunk = devices.slice(i, i + DEVICE_CONCURRENCY);
 
     const results = await Promise.allSettled(
-      chunk.map(async (d) => {
+      chunk.map(async d => {
         const res = await syncDeviceTelemetry(d);
 
         if (res.count > 0) {
           total += res.count;
 
-          await pgPool.query(
-            `
+          await pgPool.query(`
             UPDATE devices
             SET positionid = GREATEST(positionid, $1)
             WHERE device_uid = $2
-            `,
-            [res.maxPositionId, d.device_uid]
-          );
+          `, [res.maxPositionId, d.device_uid]);
         }
-
-        return res.count;
       })
     );
 
-    for (const r of results) {
+    results.forEach(r => {
       if (r.status === 'rejected') {
-        console.error('❌ Sync error:', r.reason?.message);
+        console.error('❌ Device sync error:', r.reason?.message);
       }
-    }
+    });
   }
 
   console.log(`✅ Telemetry sync complete — ${total}`);
 }
 
 // =========================
-// 5️⃣ MAIN ENTRY (BULLETPROOF)
+// MAIN ENTRY (BULLETPROOF)
 // =========================
 export async function runMariaSync() {
+  // 🔒 Process-level lock
   if (isSyncRunning) {
-    console.log('⏳ Sync skipped (already running)');
-    return { skipped: true };
+    console.log('⏳ Sync skipped (same instance running)');
+    return;
   }
 
+  // 🔒 Distributed lock (multi-server safe)
   const locked = await acquireLock();
+
   if (!locked) {
     console.log('⏳ Sync skipped (another instance running)');
-    return { skipped: true };
+    return;
   }
 
   isSyncRunning = true;
@@ -290,10 +280,10 @@ export async function runMariaSync() {
 
     console.log('✅ Maria Sync completed');
 
-    return { success: true };
   } catch (err) {
     console.error('❌ Maria Sync failed:', err.message);
     throw err;
+
   } finally {
     isSyncRunning = false;
     await releaseLock();
