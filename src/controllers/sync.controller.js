@@ -2,8 +2,6 @@ import { runMariaSync, isSyncRunning } from "../services/mariaSync.service.js";
 
 export async function triggerMariaSync(_req, res) {
   try {
-    console.log("📡 triggerMariaSync hit");
-
     if (isSyncRunning) {
       return res.status(429).json({
         success: false,
