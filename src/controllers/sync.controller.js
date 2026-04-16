@@ -1,22 +1,25 @@
-import { runMariaSync, isSyncRunning } from "../services/mariaSync.service.js";
+// src/controllers/sync.controller.js
+import { runMariaSync } from "../services/mariaSync.service.js";
 
 export async function triggerMariaSync(_req, res) {
   try {
     console.log("📡 triggerMariaSync hit");
 
-    // 🔥 Prevent duplicate execution from API layer
-    if (isSyncRunning) {
+    const startTime = Date.now();
+
+    // 🚀 Run sync (locking handled inside service)
+    const result = await runMariaSync();
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+
+    // 🔥 If skipped (already running)
+    if (result?.skipped) {
       return res.status(429).json({
         success: false,
         message: "Sync already running, please wait",
+        duration: `${duration}s`,
       });
     }
-
-    const startTime = Date.now();
-
-    await runMariaSync();
-
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
     return res.status(200).json({
       success: true,
