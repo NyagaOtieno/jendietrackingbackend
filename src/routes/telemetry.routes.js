@@ -49,11 +49,19 @@ router.post('/', deviceAuth, (req, res) => {
 
   if (!queued) {
     // Queue not ready yet (RabbitMQ still starting) — fall back to direct insert
-    pgPool.query(
-      `INSERT INTO telemetry (device_id, latitude, longitude, speed, ignition, recorded_at)
-       VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
-      [deviceId, latitude, longitude, speed ?? null, ignition ?? false, recordedAt ?? new Date().toISOString()]
-    ).catch(err => console.error('[Telemetry] Fallback insert failed:', err.message));
+   pgPool.query(
+  `INSERT INTO telemetry (
+    device_id, latitude, longitude, speed, heading, recorded_at
+  ) VALUES ($1,$2,$3,$4,$5,$6)`,
+  [
+    deviceId,
+    latitude,
+    longitude,
+    speed ?? null,
+    null, // heading missing from device input
+    recordedAt ?? new Date().toISOString()
+  ]
+).catch(err => console.error('[Telemetry] Fallback insert failed:', err.message));
   }
 
   res.status(202).json({ success: true, message: 'Telemetry received' });
@@ -79,24 +87,22 @@ router.get('/latest', requireAuth, async (req, res) => {
         : `WHERE t.device_id = $${values.length} `;
     }
 
-    const result = await pgPool.query(
-      `SELECT DISTINCT ON (t.device_id)
-         t.device_id,
-         t.latitude,
-         t.longitude,
-         t.speed,
-         t.ignition,
-         COALESCE(t.recorded_at, t.signal_time, t.device_time) AS signal_time,
-         v.plate_number
-       FROM telemetry t
-       LEFT JOIN devices d ON d.id = t.device_id
-       LEFT JOIN vehicles v ON v.id = d.vehicle_id
-       ${where}
-       ORDER BY t.device_id, COALESCE(t.recorded_at, t.signal_time, t.device_time) DESC
-       LIMIT ${parseInt(limit, 10)}`,
-      values
-    );
-
+ const result = await pgPool.query(
+  `SELECT t.device_id,
+          t.latitude,
+          t.longitude,
+          t.speed,
+          t.heading,
+          t.recorded_at,
+          v.plate_number
+   FROM telemetry t
+   LEFT JOIN devices d ON d.id = t.device_id
+   LEFT JOIN vehicles v ON v.id = d.vehicle_id
+   WHERE t.device_id = $1
+   ORDER BY t.recorded_at DESC
+   LIMIT 1`,
+  [req.device.id]
+);
     res.json({ success: true, data: result.rows });
   } catch (err) {
     console.error('Telemetry fetch error:', err);

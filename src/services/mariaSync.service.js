@@ -5,6 +5,8 @@ dotenv.config();
 import { createPool } from 'mariadb';
 import { pgPool } from '../config/db.js';
 import { publishTelemetryBatch, publishAlert } from '../queue/publisher.js';
+import { getIO } from '../socket/server.js';
+import { setLatestPosition } from '../services/cache.service.js';
 
 // =========================
 // GLOBAL LOCK (PROCESS LEVEL)
@@ -49,15 +51,44 @@ async function releaseLock() {
 // CONNECTION HELPER
 // =========================
 async function getMariaConnection(retries = 3) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await mariaPool.getConnection();
-    } catch (err) {
-      console.warn(`⚠️ Maria retry ${i + 1}:`, err.code);
-      if (i === retries - 1) throw err;
-      await new Promise(r => setTimeout(r, 2000));
+ const io = getIO(); // ⚡ WebSocket instance
+
+for (let i = 0; i < mapped.length; i += INSERT_BATCH) {
+  const batch = mapped.slice(i, i + INSERT_BATCH);
+
+  publishTelemetryBatch(batch);
+
+  for (const r of batch) {
+    // =========================
+    // 1. REDIS CACHE (FAST DASHBOARD)
+    // =========================
+    await setLatestPosition(deviceUid, r);
+
+    // =========================
+    // 2. REAL-TIME WEB SOCKET
+    // =========================
+    io.emit('vehicle:update', {
+      deviceId: deviceUid,
+      ...r,
+    });
+
+    // =========================
+    // 3. ALERT STREAM
+    // =========================
+    if (r.hasAlert) {
+      const alert = {
+        deviceId: deviceUid,
+        type: 'alarm',
+        severity: 'warning',
+        message: `Alarm code: ${r.alarmcode}`,
+      };
+
+      publishAlert(deviceUid, alert);
+
+      io.emit('alert', alert);
     }
   }
+}
 }
 
 // =========================

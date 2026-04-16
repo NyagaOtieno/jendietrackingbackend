@@ -204,6 +204,9 @@ async function startServer() {
     } catch (err) {
       console.log('⚠️ Queue init failed:', err.message);
     }
+   
+    // init websocket
+initWebSocket(server);
 
     // START HTTP + WS SERVER (IMPORTANT)
     server.listen(PORT, '0.0.0.0', () => {
