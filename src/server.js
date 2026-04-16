@@ -2,8 +2,11 @@
 import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
+import cron from 'node-cron';
+
 import { testDbConnection } from './config/db.js';
 import { initQueue } from './queue/index.js';
+import { runMariaSync } from './services/mariaSync.service.js';
 
 import positionsRoutes  from './routes/positions.routes.js';
 import fleetRoutes      from './routes/fleet.routes.js';
@@ -15,13 +18,13 @@ import vehiclesRoutes   from './routes/vehicles.routes.js';
 import syncRoutes       from './routes/sync.routes.js';
 import telemetryRoutes  from './routes/telemetry.routes.js';
 
-import cron from 'node-cron';
-import { runMariaSync } from './services/mariaSync.service.js';
-
 dotenv.config();
 
 const app = express();
+
+// 🔒 GLOBAL LOCKS
 let isRunning = false;
+let cronStarted = false;
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 app.use(
@@ -36,7 +39,6 @@ app.use(
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(express.json());
 
-// Optional request logging (helps debugging)
 app.use((req, _res, next) => {
   console.log(`${req.method} ${req.originalUrl}`);
   next();
@@ -48,9 +50,7 @@ app.get('/health', async (_req, res) => {
   try {
     await testDbConnection();
     db = 'up';
-  } catch {
-    db = 'down';
-  }
+  } catch {}
 
   res.status(db === 'up' ? 200 : 500).json({
     success: db === 'up',
@@ -59,7 +59,6 @@ app.get('/health', async (_req, res) => {
   });
 });
 
-// Root route (useful for Railway)
 app.get('/', (_req, res) => {
   res.send('🚀 Jendie Tracking Backend is running');
 });
@@ -75,7 +74,7 @@ app.use('/api/vehicles',  vehiclesRoutes);
 app.use('/api/sync',      syncRoutes);
 app.use('/api/telemetry', telemetryRoutes);
 
-// ─── 404 handler ──────────────────────────────────────────────────────────────
+// ─── 404 ──────────────────────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -94,73 +93,86 @@ app.use((error, _req, res, _next) => {
 
 // ─── Maria Sync Cron Job ──────────────────────────────────────────────────────
 export function startMariaSyncJob() {
+  if (cronStarted) {
+    console.log('⚠️ Cron already started, skipping duplicate init');
+    return;
+  }
+
   if (process.env.SYNC_ENABLED !== 'true') {
     console.log('Maria sync job disabled');
     return;
   }
+
+  cronStarted = true;
 
   console.log('Maria sync job enabled');
 
   let schedule = process.env.SYNC_CRON;
 
   if (!schedule || !/^[\d\*\/,\- ]+$/.test(schedule)) {
-    console.warn('Invalid SYNC_CRON value, falling back to safe default');
+    console.warn('Invalid SYNC_CRON value, using default */5 * * * *');
     schedule = '*/5 * * * *';
   }
 
   let lastRunAt = null;
 
-cron.schedule(schedule, async () => {
-  const now = Date.now();
+  cron.schedule(schedule, async () => {
+    const now = Date.now();
 
-  // 🔒 Prevent overlap + recover stuck jobs
-  if (isRunning) {
-    const diff = lastRunAt ? now - lastRunAt : 0;
+    // 🔒 Prevent overlap
+    if (isRunning) {
+      const diff = lastRunAt ? now - lastRunAt : 0;
 
-    if (diff > 5 * 60 * 1000) {
-      console.warn('⚠️ Previous sync stuck, resetting lock...');
-      isRunning = false;
-    } else {
-      console.log('⏳ Maria sync skipped: previous run still in progress');
-      return;
+      if (diff > 5 * 60 * 1000) {
+        console.warn('⚠️ Previous sync stuck, resetting lock...');
+        isRunning = false;
+      } else {
+        console.log('⏳ Sync skipped (already running)');
+        return;
+      }
     }
-  }
 
-  isRunning = true;
-  lastRunAt = now;
+    isRunning = true;
+    lastRunAt = now;
 
-  try {
-    console.log('🚀 Maria Sync started');
-    await runMariaSync();
-    console.log('✅ Maria Sync completed');
-  } catch (err) {
-    console.error('❌ Maria Sync failed:', err.message);
-  } finally {
-    isRunning = false;
-    lastRunAt = null;
-  }
-});
+    try {
+      await runMariaSync(); // 🚀 SINGLE ENTRY POINT
+    } catch (err) {
+      console.error('❌ Maria Sync failed:', err.message);
+    } finally {
+      isRunning = false;
+      lastRunAt = null;
+    }
+  });
 
   console.log(`Maria sync job scheduled: ${schedule}`);
 }
 
-// ─── Start Server (SAFE STARTUP) ───────────────────────────────────────────────
+// ─── Graceful shutdown ────────────────────────────────────────────────────────
+process.on('SIGINT', () => {
+  console.log('🛑 Shutting down server...');
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log('🛑 Termination signal received...');
+  process.exit(0);
+});
+
+// ─── Start Server ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 4000;
 
 async function startServer() {
   try {
-    // 1. Check DB before starting
     try {
       await testDbConnection();
       console.log('✅ Database connected');
     } catch (err) {
-      console.error('⚠️ Database connection failed (continuing):', err.message);
+      console.error('⚠️ DB connection failed (continuing):', err.message);
     }
 
-    // 2. Start cron job
     startMariaSyncJob();
 
-    // 3. Init RabbitMQ queue
     try {
       await initQueue();
       console.log('✅ Queue initialized');
@@ -168,7 +180,6 @@ async function startServer() {
       console.error('[Queue] Init error:', err.message);
     }
 
-    // 4. Start HTTP server
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Backend running on port ${PORT}`);
     });
