@@ -8,25 +8,34 @@ import { testDbConnection } from './config/db.js';
 import { initQueue } from './queue/index.js';
 import { runMariaSync } from './services/mariaSync.service.js';
 
-import positionsRoutes  from './routes/positions.routes.js';
-import fleetRoutes      from './routes/fleet.routes.js';
-import authRoutes       from './routes/auth.routes.js';
-import seedRoutes       from './routes/seed.routes.js';
-import devicesRoutes    from './routes/devices.routes.js';
-import accountsRoutes   from './routes/accounts.routes.js';
-import vehiclesRoutes   from './routes/vehicles.routes.js';
-import syncRoutes       from './routes/sync.routes.js';
-import telemetryRoutes  from './routes/telemetry.routes.js';
+import positionsRoutes from './routes/positions.routes.js';
+import fleetRoutes from './routes/fleet.routes.js';
+import authRoutes from './routes/auth.routes.js';
+import seedRoutes from './routes/seed.routes.js';
+import devicesRoutes from './routes/devices.routes.js';
+import accountsRoutes from './routes/accounts.routes.js';
+import vehiclesRoutes from './routes/vehicles.routes.js';
+import syncRoutes from './routes/sync.routes.js';
+import telemetryRoutes from './routes/telemetry.routes.js';
 
 dotenv.config();
 
 const app = express();
 
-// 🔒 GLOBAL LOCKS
+// =========================
+// GLOBAL SAFETY LOCKS
+// =========================
 let isRunning = false;
 let cronStarted = false;
 
-// ─── CORS ─────────────────────────────────────────────────────────────────────
+// =========================
+// PROCESS-LEVEL LOCK (PM2 SAFE)
+// =========================
+global.__MARIASYNC_RUNNING__ = global.__MARIASYNC_RUNNING__ || false;
+
+// =========================
+// CORS
+// =========================
 app.use(
   cors({
     origin: process.env.FRONTEND_ORIGIN
@@ -36,21 +45,28 @@ app.use(
   })
 );
 
-// ─── Middleware ───────────────────────────────────────────────────────────────
+// =========================
+// MIDDLEWARE
+// =========================
 app.use(express.json());
 
 app.use((req, _res, next) => {
-  console.log(`${req.method} ${req.originalUrl}`);
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
   next();
 });
 
-// ─── Health check ─────────────────────────────────────────────────────────────
+// =========================
+// HEALTH CHECK
+// =========================
 app.get('/health', async (_req, res) => {
   let db = 'down';
+
   try {
     await testDbConnection();
     db = 'up';
-  } catch {}
+  } catch (err) {
+    db = 'down';
+  }
 
   res.status(db === 'up' ? 200 : 500).json({
     success: db === 'up',
@@ -59,22 +75,29 @@ app.get('/health', async (_req, res) => {
   });
 });
 
+// =========================
+// ROOT
+// =========================
 app.get('/', (_req, res) => {
   res.send('🚀 Jendie Tracking Backend is running');
 });
 
-// ─── Routes ───────────────────────────────────────────────────────────────────
-app.use('/api/auth',      authRoutes);
-app.use('/api/seed',      seedRoutes);
-app.use('/api/accounts',  accountsRoutes);
-app.use('/api/devices',   devicesRoutes);
+// =========================
+// ROUTES (UNCHANGED)
+// =========================
+app.use('/api/auth', authRoutes);
+app.use('/api/seed', seedRoutes);
+app.use('/api/accounts', accountsRoutes);
+app.use('/api/devices', devicesRoutes);
 app.use('/api/positions', positionsRoutes);
-app.use('/api/fleet',     fleetRoutes);
-app.use('/api/vehicles',  vehiclesRoutes);
-app.use('/api/sync',      syncRoutes);
+app.use('/api/fleet', fleetRoutes);
+app.use('/api/vehicles', vehiclesRoutes);
+app.use('/api/sync', syncRoutes);
 app.use('/api/telemetry', telemetryRoutes);
 
-// ─── 404 ──────────────────────────────────────────────────────────────────────
+// =========================
+// 404
+// =========================
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -82,84 +105,81 @@ app.use((req, res) => {
   });
 });
 
-// ─── Error handler ────────────────────────────────────────────────────────────
+// =========================
+// ERROR HANDLER
+// =========================
 app.use((error, _req, res, _next) => {
-  console.error('Unhandled server error:', error);
+  console.error('❌ Unhandled error:', error);
   res.status(500).json({
     success: false,
     message: 'Internal server error',
   });
 });
 
-// ─── Maria Sync Cron Job ──────────────────────────────────────────────────────
+// =========================
+// SAFE CRON JOB
+// =========================
 export function startMariaSyncJob() {
   if (cronStarted) {
-    console.log('⚠️ Cron already started, skipping duplicate init');
+    console.log('⚠️ Cron already initialized, skipping');
     return;
   }
 
   if (process.env.SYNC_ENABLED !== 'true') {
-    console.log('Maria sync job disabled');
+    console.log('⛔ Maria sync disabled via ENV');
     return;
   }
 
   cronStarted = true;
 
-  console.log('Maria sync job enabled');
+  const schedule =
+    process.env.SYNC_CRON && /^[\d\*\/,\- ]+$/.test(process.env.SYNC_CRON)
+      ? process.env.SYNC_CRON
+      : '*/5 * * * *';
 
-  let schedule = process.env.SYNC_CRON;
-
-  if (!schedule || !/^[\d\*\/,\- ]+$/.test(schedule)) {
-    console.warn('Invalid SYNC_CRON value, using default */5 * * * *');
-    schedule = '*/5 * * * *';
-  }
-
-  let lastRunAt = null;
+  console.log(`📦 Maria sync scheduled: ${schedule}`);
 
   cron.schedule(schedule, async () => {
-    const now = Date.now();
-
-    // 🔒 Prevent overlap
-    if (isRunning) {
-      const diff = lastRunAt ? now - lastRunAt : 0;
-
-      if (diff > 5 * 60 * 1000) {
-        console.warn('⚠️ Previous sync stuck, resetting lock...');
-        isRunning = false;
-      } else {
-        console.log('⏳ Sync skipped (already running)');
-        return;
-      }
+    // =========================
+    // HARD LOCK (PREVENT ANY DOUBLE RUN)
+    // =========================
+    if (isRunning || global.__MARIASYNC_RUNNING__) {
+      console.log('⏳ Sync skipped (already running globally)');
+      return;
     }
 
     isRunning = true;
-    lastRunAt = now;
+    global.__MARIASYNC_RUNNING__ = true;
 
     try {
-      await runMariaSync(); // 🚀 SINGLE ENTRY POINT
+      console.log('🚀 Maria Sync started');
+      await runMariaSync();
+      console.log('✅ Maria Sync completed');
     } catch (err) {
       console.error('❌ Maria Sync failed:', err.message);
     } finally {
       isRunning = false;
-      lastRunAt = null;
+      global.__MARIASYNC_RUNNING__ = false;
     }
   });
-
-  console.log(`Maria sync job scheduled: ${schedule}`);
 }
 
-// ─── Graceful shutdown ────────────────────────────────────────────────────────
+// =========================
+// GRACEFUL SHUTDOWN
+// =========================
 process.on('SIGINT', () => {
-  console.log('🛑 Shutting down server...');
+  console.log('🛑 SIGINT received, shutting down...');
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  console.log('🛑 Termination signal received...');
+  console.log('🛑 SIGTERM received, shutting down...');
   process.exit(0);
 });
 
-// ─── Start Server ─────────────────────────────────────────────────────────────
+// =========================
+// START SERVER
+// =========================
 const PORT = process.env.PORT || 4000;
 
 async function startServer() {
@@ -168,7 +188,7 @@ async function startServer() {
       await testDbConnection();
       console.log('✅ Database connected');
     } catch (err) {
-      console.error('⚠️ DB connection failed (continuing):', err.message);
+      console.log('⚠️ DB connection failed but continuing:', err.message);
     }
 
     startMariaSyncJob();
@@ -177,7 +197,7 @@ async function startServer() {
       await initQueue();
       console.log('✅ Queue initialized');
     } catch (err) {
-      console.error('[Queue] Init error:', err.message);
+      console.log('⚠️ Queue init failed:', err.message);
     }
 
     app.listen(PORT, '0.0.0.0', () => {
@@ -185,7 +205,7 @@ async function startServer() {
     });
 
   } catch (err) {
-    console.error('❌ Failed to start server:', err);
+    console.error('❌ Fatal startup error:', err);
     process.exit(1);
   }
 }
