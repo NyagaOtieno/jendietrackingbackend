@@ -7,6 +7,11 @@ import { pgPool } from '../config/db.js';
 import { publishTelemetryBatch, publishAlert } from '../queue/publisher.js';
 
 // =========================
+// GLOBAL SYNC LOCK (PREVENT DOUBLE RUNS)
+// =========================
+let isSyncRunning = false;
+
+// =========================
 // MariaDB Pool
 // =========================
 const mariaPool = createPool({
@@ -19,7 +24,9 @@ const mariaPool = createPool({
   acquireTimeout: 30000,
 });
 
-// Retry helper
+// =========================
+// Connection helper
+// =========================
 async function getMariaConnection(retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -27,19 +34,19 @@ async function getMariaConnection(retries = 3) {
     } catch (err) {
       console.warn(`⚠️ MariaDB connection attempt ${i + 1} failed:`, err.code);
       if (i === retries - 1) throw err;
-      await new Promise(res => setTimeout(res, 2000));
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
 }
 
 // =========================
-// Config
+// CONFIG
 // =========================
 const INSERT_BATCH = parseInt(process.env.INSERT_BATCH || '100', 10);
 const DEVICE_CONCURRENCY = parseInt(process.env.DEVICE_CONCURRENCY || '20', 10);
 
 // =========================
-// 1️⃣ VEHICLES SYNC (UNCHANGED LOGIC)
+// 1️⃣ VEHICLES SYNC (UNCHANGED FUNCTIONALITY)
 // =========================
 export async function syncVehicles() {
   const conn = await getMariaConnection();
@@ -87,7 +94,7 @@ export async function syncVehicles() {
 }
 
 // =========================
-// 2️⃣ DEVICES SYNC (POSITIONID ADDED + SAFE)
+// 2️⃣ DEVICES SYNC (WITH POSITIONID SUPPORT)
 // =========================
 export async function syncDevices() {
   const conn = await getMariaConnection();
@@ -101,6 +108,8 @@ export async function syncDevices() {
     for (const r of rows) {
       if (!r.uniqueid) continue;
 
+      const deviceUid = r.uniqueid;
+
       await pgPool.query(
         `
         INSERT INTO devices (device_uid, serial, positionid)
@@ -110,8 +119,8 @@ export async function syncDevices() {
           positionid  = EXCLUDED.positionid
         `,
         [
-          r.uniqueid,
-          r.uniqueid,
+          deviceUid,
+          deviceUid,
           r.positionid || 0
         ]
       );
@@ -124,7 +133,7 @@ export async function syncDevices() {
 }
 
 // =========================
-// 3️⃣ TELEMETRY PER DEVICE (POSITIONID INCREMENTAL)
+// 3️⃣ TELEMETRY SYNC PER DEVICE (POSITIONID INCREMENTAL)
 // =========================
 async function syncDeviceTelemetry(device) {
   const conn = await getMariaConnection();
@@ -208,56 +217,66 @@ async function syncDeviceTelemetry(device) {
 }
 
 // =========================
-// 4️⃣ TELEMETRY SYNC ORCHESTRATOR
+// 4️⃣ TELEMETRY ORCHESTRATOR (SAFE + NO DOUBLE RUN)
 // =========================
 export async function syncTelemetry() {
-  const result = await pgPool.query(`
-    SELECT device_uid, positionid
-    FROM devices
-  `);
-
-  const devices = result.rows;
-
-  console.log(`🔄 Syncing telemetry for ${devices.length} devices`);
-
-  let total = 0;
-
-  let offset = 0;
-
-  while (offset < devices.length) {
-    const chunk = devices.slice(offset, offset + DEVICE_CONCURRENCY);
-    offset += DEVICE_CONCURRENCY;
-
-    const results = await Promise.allSettled(
-      chunk.map(async (d) => {
-        const res = await syncDeviceTelemetry(d);
-
-        if (res.count > 0) {
-          total += res.count;
-
-          // 🔥 UPDATE CURSOR BACK TO POSTGRES
-          await pgPool.query(
-            `
-            UPDATE devices
-            SET positionid = $1
-            WHERE device_uid = $2
-            `,
-            [res.maxPositionId, d.device_uid]
-          );
-        }
-
-        return res.count;
-      })
-    );
-
-    for (const r of results) {
-      if (r.status === 'rejected') {
-        console.error('❌ Sync error:', r.reason?.message);
-      }
-    }
+  if (isSyncRunning) {
+    console.log('⏳ Sync skipped: already running');
+    return;
   }
 
-  console.log(`✅ Telemetry sync complete — ${total}`);
+  isSyncRunning = true;
+
+  try {
+    const result = await pgPool.query(`
+      SELECT device_uid, positionid
+      FROM devices
+    `);
+
+    const devices = result.rows;
+
+    console.log(`🔄 Syncing telemetry for ${devices.length} devices`);
+
+    let total = 0;
+    let offset = 0;
+
+    while (offset < devices.length) {
+      const chunk = devices.slice(offset, offset + DEVICE_CONCURRENCY);
+      offset += DEVICE_CONCURRENCY;
+
+      const results = await Promise.allSettled(
+        chunk.map(async (d) => {
+          const res = await syncDeviceTelemetry(d);
+
+          if (res.count > 0) {
+            total += res.count;
+
+            await pgPool.query(
+              `
+              UPDATE devices
+              SET positionid = $1
+              WHERE device_uid = $2
+              `,
+              [res.maxPositionId, d.device_uid]
+            );
+          }
+
+          return res.count;
+        })
+      );
+
+      for (const r of results) {
+        if (r.status === 'rejected') {
+          console.error('❌ Sync error:', r.reason?.message);
+        }
+      }
+    }
+
+    console.log(`✅ Telemetry sync complete — ${total}`);
+
+  } finally {
+    isSyncRunning = false;
+  }
 }
 
 // =========================
