@@ -69,7 +69,7 @@ export async function syncVehicles() {
       if (!r.serial) continue;
 
       const serialKey = String(r.serial).padStart(1, '0');
-      const plate = (r.reg_no || `PLATE_${serialKey}`).trim();
+      const plate = (r.reg_no || `PLATE_${serialKey}`).trim().substring(0, 100);
 
       await pgPool.query(`
         INSERT INTO vehicles
