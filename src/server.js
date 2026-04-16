@@ -167,7 +167,7 @@ export function startMariaSyncJob() {
 
     try {
       console.log('🚀 Maria Sync started');
-      await runMariaSync(io); // ⚡ PASS IO INTO SYNC (IMPORTANT)
+      await runMariaSync();
       console.log('✅ Maria Sync completed');
     } catch (err) {
       console.error('❌ Maria Sync failed:', err.message);

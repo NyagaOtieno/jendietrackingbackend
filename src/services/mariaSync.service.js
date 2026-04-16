@@ -5,8 +5,8 @@ dotenv.config();
 import { createPool } from 'mariadb';
 import { pgPool } from '../config/db.js';
 import { publishTelemetryBatch, publishAlert } from '../queue/publisher.js';
-import { getIO } from '../socket/server.js';
 import { setLatestPosition } from '../services/cache.service.js';
+import { getIO } from '../socket/server.js'; // ✅ FIXED IMPORT
 
 // =========================
 // GLOBAL LOCK
@@ -148,7 +148,7 @@ export async function syncDevices() {
 }
 
 // =========================
-// TELEMETRY SYNC (CORE REALTIME ENGINE)
+// TELEMETRY PER DEVICE
 // =========================
 async function syncDeviceTelemetry(device) {
   let conn;
@@ -198,27 +198,30 @@ async function syncDeviceTelemetry(device) {
       };
     });
 
-    const io = getIO();
+    // ✅ SAFE SOCKET ACCESS
+    let io;
+    try {
+      io = getIO();
+    } catch {
+      io = null;
+    }
 
-    // =========================
-    // PROCESS BATCHES
-    // =========================
     for (let i = 0; i < mapped.length; i += INSERT_BATCH) {
       const batch = mapped.slice(i, i + INSERT_BATCH);
 
       publishTelemetryBatch(batch);
 
       for (const r of batch) {
-        // 🔥 Redis cache (FAST DASHBOARD)
         await setLatestPosition(deviceUid, r);
 
-        // 🔥 WebSocket real-time update
-        io.emit('vehicle:update', {
-          deviceId: deviceUid,
-          ...r,
-        });
+        // ✅ SAFE EMIT
+        if (io) {
+          io.emit('vehicle:update', {
+            deviceId: deviceUid,
+            ...r,
+          });
+        }
 
-        // 🔥 Alerts
         if (r.hasAlert) {
           const alert = {
             deviceId: deviceUid,
@@ -228,7 +231,10 @@ async function syncDeviceTelemetry(device) {
           };
 
           publishAlert(deviceUid, alert);
-          io.emit('alert', alert);
+
+          if (io) {
+            io.emit('alert', alert);
+          }
         }
       }
     }

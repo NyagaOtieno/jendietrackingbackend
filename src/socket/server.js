@@ -1,35 +1,22 @@
 import { Server } from 'socket.io';
 
-let io = null;
+let io;
 
-// =========================
-// INIT WEBSOCKET
-// =========================
 export function initWebSocket(server) {
+  if (io) return io; // prevent double init
+
   io = new Server(server, {
-    cors: {
-      origin: '*',
-      methods: ['GET', 'POST'],
-    },
+    cors: { origin: '*' },
   });
 
-  io.on('connection', (socket) => {
-    console.log('⚡ client connected:', socket.id);
-
-    socket.on('disconnect', () => {
-      console.log('❌ client disconnected:', socket.id);
-    });
-  });
+  console.log('⚡ WebSocket initialized');
 
   return io;
 }
 
-// =========================
-// GET IO INSTANCE (THIS FIXES YOUR ERROR)
-// =========================
 export function getIO() {
   if (!io) {
-    throw new Error('Socket not initialized. Call initWebSocket(server) first.');
+    throw new Error('WebSocket not initialized');
   }
   return io;
 }
