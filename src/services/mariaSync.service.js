@@ -7,11 +7,9 @@ import { pgPool } from '../config/db.js';
 import { publishTelemetryBatch, publishAlert } from '../queue/publisher.js';
 import { getIO } from '../socket/server.js';
 import { setLatestPosition } from '../services/cache.service.js';
-import http from 'http';
-import { initWebSocket } from './socket/server.js';
 
 // =========================
-// GLOBAL LOCK (PROCESS LEVEL)
+// GLOBAL LOCK
 // =========================
 let isSyncRunning = false;
 export { isSyncRunning };
@@ -50,47 +48,18 @@ async function releaseLock() {
 }
 
 // =========================
-// CONNECTION HELPER
+// CONNECTION
 // =========================
 async function getMariaConnection(retries = 3) {
- const io = getIO(); // ⚡ WebSocket instance
-
-for (let i = 0; i < mapped.length; i += INSERT_BATCH) {
-  const batch = mapped.slice(i, i + INSERT_BATCH);
-
-  publishTelemetryBatch(batch);
-
-  for (const r of batch) {
-    // =========================
-    // 1. REDIS CACHE (FAST DASHBOARD)
-    // =========================
-    await setLatestPosition(deviceUid, r);
-
-    // =========================
-    // 2. REAL-TIME WEB SOCKET
-    // =========================
-    io.emit('vehicle:update', {
-      deviceId: deviceUid,
-      ...r,
-    });
-
-    // =========================
-    // 3. ALERT STREAM
-    // =========================
-    if (r.hasAlert) {
-      const alert = {
-        deviceId: deviceUid,
-        type: 'alarm',
-        severity: 'warning',
-        message: `Alarm code: ${r.alarmcode}`,
-      };
-
-      publishAlert(deviceUid, alert);
-
-      io.emit('alert', alert);
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await mariaPool.getConnection();
+    } catch (err) {
+      console.warn(`⚠️ Maria retry ${i + 1}`, err.code);
+      if (i === retries - 1) throw err;
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
-}
 }
 
 // =========================
@@ -98,6 +67,7 @@ for (let i = 0; i < mapped.length; i += INSERT_BATCH) {
 // =========================
 export async function syncVehicles() {
   let conn;
+
   try {
     conn = await getMariaConnection();
 
@@ -110,9 +80,7 @@ export async function syncVehicles() {
       if (!r.serial) continue;
 
       const serialKey = String(r.serial);
-      const plate = (r.reg_no || `PLATE_${serialKey}`)
-        .trim()
-        .substring(0, 100);
+      const plate = (r.reg_no || `PLATE_${serialKey}`).trim().substring(0, 100);
 
       await pgPool.query(
         `INSERT INTO vehicles
@@ -121,9 +89,9 @@ export async function syncVehicles() {
         ON CONFLICT (serial)
         DO UPDATE SET
           plate_number = EXCLUDED.plate_number,
-          unit_name    = EXCLUDED.unit_name,
-          model        = EXCLUDED.model,
-          status       = EXCLUDED.status`,
+          unit_name = EXCLUDED.unit_name,
+          model = EXCLUDED.model,
+          status = EXCLUDED.status`,
         [
           serialKey,
           plate,
@@ -148,6 +116,7 @@ export async function syncVehicles() {
 // =========================
 export async function syncDevices() {
   let conn;
+
   try {
     conn = await getMariaConnection();
 
@@ -161,11 +130,11 @@ export async function syncDevices() {
 
       await pgPool.query(
         `INSERT INTO devices (device_uid, serial, positionid)
-        VALUES ($1,$2,$3)
-        ON CONFLICT (device_uid)
-        DO UPDATE SET
-          serial = EXCLUDED.serial,
-          positionid = EXCLUDED.positionid`,
+         VALUES ($1,$2,$3)
+         ON CONFLICT (device_uid)
+         DO UPDATE SET
+           serial = EXCLUDED.serial,
+           positionid = EXCLUDED.positionid`,
         [r.uniqueid, r.uniqueid, r.positionid || 0]
       );
     }
@@ -179,7 +148,7 @@ export async function syncDevices() {
 }
 
 // =========================
-// TELEMETRY PER DEVICE
+// TELEMETRY SYNC (CORE REALTIME ENGINE)
 // =========================
 async function syncDeviceTelemetry(device) {
   let conn;
@@ -229,18 +198,37 @@ async function syncDeviceTelemetry(device) {
       };
     });
 
+    const io = getIO();
+
+    // =========================
+    // PROCESS BATCHES
+    // =========================
     for (let i = 0; i < mapped.length; i += INSERT_BATCH) {
       const batch = mapped.slice(i, i + INSERT_BATCH);
 
       publishTelemetryBatch(batch);
 
       for (const r of batch) {
+        // 🔥 Redis cache (FAST DASHBOARD)
+        await setLatestPosition(deviceUid, r);
+
+        // 🔥 WebSocket real-time update
+        io.emit('vehicle:update', {
+          deviceId: deviceUid,
+          ...r,
+        });
+
+        // 🔥 Alerts
         if (r.hasAlert) {
-          publishAlert(deviceUid, {
+          const alert = {
+            deviceId: deviceUid,
             type: 'alarm',
             severity: 'warning',
             message: `Alarm code: ${r.alarmcode}`,
-          });
+          };
+
+          publishAlert(deviceUid, alert);
+          io.emit('alert', alert);
         }
       }
     }
@@ -250,7 +238,6 @@ async function syncDeviceTelemetry(device) {
   } catch (err) {
     console.error(`❌ Device ${device.device_uid} sync error:`, err.message);
     return { count: 0, maxPositionId: device.positionid || 0 };
-
   } finally {
     if (conn) conn.release();
   }
