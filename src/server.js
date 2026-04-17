@@ -23,6 +23,9 @@ import accountsRoutes from './routes/accounts.routes.js';
 import vehiclesRoutes from './routes/vehicles.routes.js';
 import syncRoutes from './routes/sync.routes.js';
 import telemetryRoutes from './routes/telemetry.routes.js';
+import { startTelemetryBufferWorker } from './workers/telemetryBufferWorker.js';
+
+startTelemetryBufferWorker();
 
 const app = express();
 
