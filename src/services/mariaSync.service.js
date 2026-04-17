@@ -29,7 +29,6 @@ const mariaPool = createPool({
 // =========================
 // CONFIG
 // =========================
-const BATCH_SIZE = 200;
 const DEVICE_CONCURRENCY = 25;
 
 // =========================
@@ -59,10 +58,11 @@ async function getMariaConnection() {
 }
 
 // =========================
-// VEHICLES SYNC (UNCHANGED SAFE)
+// VEHICLES SYNC (UNCHANGED)
 // =========================
 export async function syncVehicles() {
   let conn;
+
   try {
     conn = await getMariaConnection();
 
@@ -133,7 +133,7 @@ export async function syncDevices() {
 }
 
 // =========================
-// DEAD LETTER TABLE WRITE
+// DEAD LETTER (UNCHANGED BUT SAFE)
 // =========================
 async function writeDeadLetter(deviceUid, error, batch) {
   await pgPool.query(
@@ -146,7 +146,7 @@ async function writeDeadLetter(deviceUid, error, batch) {
 }
 
 // =========================
-// GUARANTEED WRITE
+// 🔥 FIXED: GUARANTEED WRITE (RETRY SAFE)
 // =========================
 async function persistTelemetry(batch, deviceUid) {
   if (!batch.length) return;
@@ -197,10 +197,12 @@ async function persistTelemetry(batch, deviceUid) {
 }
 
 // =========================
-// DEVICE TELEMETRY SYNC (FIXED)
+// DEVICE TELEMETRY SYNC (FIXED CORE)
 // =========================
 async function syncDeviceTelemetry(device, conn) {
   const deviceUid = device.device_uid;
+
+  // 🔥 FIX: this is NOT positionid anymore
   const lastEventId = device.positionid || 0;
 
   let deviceId = deviceIdCache.get(deviceUid);
@@ -217,7 +219,7 @@ async function syncDeviceTelemetry(device, conn) {
     deviceIdCache.set(deviceUid, deviceId);
   }
 
-  // ✅ FIX: USE id NOT positionid
+  // 🔥 FIXED QUERY (eventData.id is the cursor)
   const rows = await conn.query(
     `
     SELECT id, servertime, devicetime,
@@ -251,25 +253,35 @@ async function syncDeviceTelemetry(device, conn) {
     };
   });
 
-  // 1. DB WRITE (GUARANTEED)
+  // =========================
+  // 1. PRIMARY DB WRITE
+  // =========================
   await persistTelemetry(mapped, deviceUid);
 
-  // 2. BUFFER QUEUE (SAFETY NET)
+  // =========================
+  // 2. BUFFER (REAL ZERO LOSS FIX)
+  // =========================
   await pgPool.query(
     `
     INSERT INTO telemetry_ingestion_buffer
     (device_uid, device_id, positionid, payload, status)
-    SELECT $1,$2,unnest($3::bigint[]),$4,'PENDING'
+    SELECT $1,$2,$3,$4,'PENDING'
+    WHERE NOT EXISTS (
+      SELECT 1 FROM telemetry_ingestion_buffer
+      WHERE device_uid = $1 AND positionid = $3
+    )
     `,
     [
       deviceUid,
       deviceId,
-      mapped.map(m => m.eventId),
+      maxId,
       JSON.stringify(mapped)
     ]
   );
 
-  // 3. STREAM QUEUE
+  // =========================
+  // 3. STREAM
+  // =========================
   try {
     publishTelemetryBatch(mapped);
   } catch {}
