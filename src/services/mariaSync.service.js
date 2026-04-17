@@ -1,4 +1,3 @@
-// src/services/mariaSync.service.js
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -15,7 +14,7 @@ let isSyncRunning = false;
 export { isSyncRunning };
 
 // =========================
-// MARIA DB POOL
+// MARIA POOL
 // =========================
 const mariaPool = createPool({
   host: process.env.MARIA_DB_HOST,
@@ -23,23 +22,23 @@ const mariaPool = createPool({
   user: process.env.MARIA_DB_USER,
   password: process.env.MARIA_DB_PASSWORD,
   database: process.env.MARIA_DB_NAME || 'uradi',
-  connectionLimit: 20,
+  connectionLimit: 30,
   acquireTimeout: 30000,
 });
 
 // =========================
 // CONFIG
 // =========================
-const INSERT_BATCH = Number(process.env.INSERT_BATCH || 100);
-const DEVICE_CONCURRENCY = Number(process.env.DEVICE_CONCURRENCY || 20);
+const INSERT_BATCH = Number(process.env.INSERT_BATCH || 200);
+const DEVICE_CONCURRENCY = Number(process.env.DEVICE_CONCURRENCY || 25);
 
 // =========================
-// LOCAL CACHE (🔥 NEW)
+// CACHE
 // =========================
 const deviceIdCache = new Map();
 
 // =========================
-// DISTRIBUTED LOCK
+// LOCK
 // =========================
 async function acquireLock() {
   const res = await pgPool.query(
@@ -53,7 +52,7 @@ async function releaseLock() {
 }
 
 // =========================
-// CONNECTION
+// MARIA CONNECTION
 // =========================
 async function getMariaConnection(retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -62,13 +61,13 @@ async function getMariaConnection(retries = 3) {
     } catch (err) {
       console.warn(`⚠️ Maria retry ${i + 1}`, err.code);
       if (i === retries - 1) throw err;
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1500));
     }
   }
 }
 
 // =========================
-// VEHICLES SYNC
+// VEHICLES SYNC (UNCHANGED)
 // =========================
 export async function syncVehicles() {
   let conn;
@@ -112,8 +111,6 @@ export async function syncVehicles() {
     }
 
     console.log(`✅ Vehicles synced: ${rows.length}`);
-  } catch (err) {
-    console.error('❌ syncVehicles error:', err.message);
   } finally {
     if (conn) conn.release();
   }
@@ -136,7 +133,7 @@ export async function syncDevices() {
     for (const r of rows) {
       if (!r.uniqueid) continue;
 
-      deviceIdCache.set(r.uniqueid, r.id); // 🔥 cache it
+      deviceIdCache.set(r.uniqueid, r.id);
 
       await pgPool.query(
         `INSERT INTO devices (device_uid, serial, positionid)
@@ -150,22 +147,89 @@ export async function syncDevices() {
     }
 
     console.log(`✅ Devices synced: ${rows.length}`);
-  } catch (err) {
-    console.error('❌ syncDevices error:', err.message);
   } finally {
     if (conn) conn.release();
   }
 }
 
 // =========================
-// TELEMETRY PER DEVICE
+// 🔥 FIXED: SAFE TELEMETRY WRITE
+// =========================
+async function persistTelemetryBatch(batch) {
+  if (!batch.length) return;
+
+  const values = [];
+  const placeholders = [];
+  let i = 1;
+
+  for (const r of batch) {
+    placeholders.push(
+      `($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`
+    );
+
+    values.push(
+      r.deviceId,
+      r.receivedAt,
+      r.deviceTime,
+      r.latitude,
+      r.longitude,
+      r.speedKph,
+      r.heading,
+      r.alarmcode
+    );
+  }
+
+  const query = `
+    INSERT INTO telemetry (
+      device_id,
+      recorded_at,
+      device_time,
+      latitude,
+      longitude,
+      speed,
+      heading,
+      alarmcode
+    )
+    VALUES ${placeholders.join(',')}
+    ON CONFLICT (device_id, recorded_at)
+    DO NOTHING
+  `;
+
+  await pgPool.query(query, values);
+}
+
+// =========================
+// BUFFER (ZERO LOSS SAFETY NET)
+// =========================
+async function persistBuffer(deviceId, deviceUid, rows) {
+  if (!rows.length) return;
+
+  for (const r of rows) {
+    await pgPool.query(
+      `
+      INSERT INTO telemetry_ingestion_buffer
+      (device_uid, device_id, positionid, payload, status)
+      VALUES ($1,$2,$3,$4,'PENDING')
+      ON CONFLICT DO NOTHING
+      `,
+      [
+        deviceUid,
+        deviceId,
+        r.positionid,
+        JSON.stringify(r)
+      ]
+    );
+  }
+}
+
+// =========================
+// DEVICE SYNC CORE
 // =========================
 async function syncDeviceTelemetry(device, conn) {
   try {
     const deviceUid = device.device_uid;
     const lastPositionId = device.positionid || 0;
 
-    // 🔥 USE CACHE (avoids subquery)
     let deviceId = deviceIdCache.get(deviceUid);
 
     if (!deviceId) {
@@ -173,14 +237,12 @@ async function syncDeviceTelemetry(device, conn) {
         `SELECT id FROM device WHERE uniqueid = ? LIMIT 1`,
         [deviceUid]
       );
+
       deviceId = res?.[0]?.id;
       if (deviceId) deviceIdCache.set(deviceUid, deviceId);
     }
 
-    if (!deviceId) {
-      console.warn(`⚠️ Device not found in Maria: ${deviceUid}`);
-      return { count: 0, maxPositionId: lastPositionId };
-    }
+    if (!deviceId) return { count: 0, maxPositionId: lastPositionId };
 
     const rows = await conn.query(
       `
@@ -191,85 +253,75 @@ async function syncDeviceTelemetry(device, conn) {
       AND positionid > ?
       ORDER BY positionid ASC
       LIMIT 5000
-    `,
+      `,
       [deviceId, lastPositionId]
     );
 
-    if (!rows.length) {
-      return { count: 0, maxPositionId: lastPositionId };
-    }
+    if (!rows.length) return { count: 0, maxPositionId: lastPositionId };
 
     let maxPositionId = lastPositionId;
 
-    const mapped = rows.map(e => {
-      if (e.positionid > maxPositionId) {
-        maxPositionId = e.positionid;
-      }
+    const mapped = rows.map(r => {
+      if (r.positionid > maxPositionId) maxPositionId = r.positionid;
 
       return {
         deviceId: deviceUid,
-        receivedAt: new Date(e.servertime),
-        deviceTime: e.devicetime ? new Date(e.devicetime) : null,
-        latitude: Number(e.latitude) || 0,
-        longitude: Number(e.longitude) || 0,
-        speedKph: Number(e.speed) || 0,
-        heading: Number(e.course) || 0,
-        alarmcode: e.alarmcode || null,
-        hasAlert: !!e.alarmcode,
+        receivedAt: new Date(r.servertime),
+        deviceTime: r.devicetime ? new Date(r.devicetime) : null,
+        latitude: Number(r.latitude) || 0,
+        longitude: Number(r.longitude) || 0,
+        speedKph: Number(r.speed) || 0,
+        heading: Number(r.course) || 0,
+        alarmcode: r.alarmcode || null,
+        positionid: r.positionid
       };
     });
 
+    // 1. GUARANTEED WRITE
+    try {
+      await persistTelemetryBatch(mapped);
+    } catch (err) {
+      console.error('PRIMARY WRITE FAILED → BUFFERING', err.message);
+      await persistBuffer(deviceId, deviceUid, mapped);
+    }
+
+    // 2. QUEUE
+    try {
+      publishTelemetryBatch(mapped);
+    } catch {}
+
+    // 3. REALTIME
     let io;
     try { io = getIO(); } catch { io = null; }
 
-    for (let i = 0; i < mapped.length; i += INSERT_BATCH) {
-      const batch = mapped.slice(i, i + INSERT_BATCH);
+    for (const r of mapped) {
+      await setLatestPosition(deviceUid, r);
 
-      // ✅ SAFE QUEUE
-      try {
-        publishTelemetryBatch(batch);
-      } catch (err) {
-        console.warn('⚠️ Queue publish failed:', err.message);
+      if (io) io.emit('vehicle:update', { deviceId: deviceUid, ...r });
+
+      if (r.alarmcode) {
+        const alert = {
+          deviceId: deviceUid,
+          type: 'alarm',
+          severity: 'warning',
+          message: `Alarm code: ${r.alarmcode}`,
+        };
+
+        try { publishAlert(deviceUid, alert); } catch {}
+        if (io) io.emit('alert', alert);
       }
-
-      for (const r of batch) {
-        try {
-          await setLatestPosition(deviceUid, r);
-        } catch {}
-
-        if (io) {
-          io.emit('vehicle:update', { deviceId: deviceUid, ...r });
-        }
-
-        if (r.hasAlert) {
-          const alert = {
-            deviceId: deviceUid,
-            type: 'alarm',
-            severity: 'warning',
-            message: `Alarm code: ${r.alarmcode}`,
-          };
-
-          try {
-            publishAlert(deviceUid, alert);
-          } catch {}
-
-          if (io) io.emit('alert', alert);
-        }
-      }
-
-      await new Promise(r => setImmediate(r));
     }
 
     return { count: mapped.length, maxPositionId };
 
   } catch (err) {
-    console.error(`❌ Device ${device.device_uid} sync error:`, err.message);
+    console.error(`❌ Device ${device.device_uid} error:`, err.message);
     return { count: 0, maxPositionId: device.positionid || 0 };
   }
 }
 
 // =========================
-// TELEMETRY ORCHESTRATOR
+// ORCHESTRATOR
 // =========================
 export async function syncTelemetry() {
   let conn;
@@ -281,8 +333,6 @@ export async function syncTelemetry() {
       SELECT device_uid, positionid FROM devices
     `);
 
-    console.log(`🔄 Syncing telemetry for ${devices.length} devices`);
-
     let total = 0;
 
     for (let i = 0; i < devices.length; i += DEVICE_CONCURRENCY) {
@@ -292,9 +342,9 @@ export async function syncTelemetry() {
         chunk.map(d => syncDeviceTelemetry(d, conn))
       );
 
-      for (let idx = 0; idx < results.length; idx++) {
-        const res = results[idx];
-        const device = chunk[idx];
+      for (let i = 0; i < results.length; i++) {
+        const res = results[i];
+        const dev = chunk[i];
 
         if (res.status === 'fulfilled' && res.value.count > 0) {
           total += res.value.count;
@@ -303,50 +353,34 @@ export async function syncTelemetry() {
             `UPDATE devices
              SET positionid = GREATEST(positionid, $1)
              WHERE device_uid = $2`,
-            [res.value.maxPositionId, device.device_uid]
+            [res.value.maxPositionId, dev.device_uid]
           );
         }
       }
     }
 
-    console.log(`✅ Telemetry sync complete — ${total}`);
+    console.log(`✅ Telemetry sync complete: ${total}`);
 
-  } catch (err) {
-    console.error('❌ syncTelemetry error:', err.message);
   } finally {
     if (conn) conn.release();
   }
 }
 
 // =========================
-// MAIN ENTRY
+// RUN
 // =========================
 export async function runMariaSync() {
-  if (isSyncRunning) {
-    console.log('⏳ Sync skipped (same instance)');
-    return;
-  }
+  if (isSyncRunning) return;
 
   const locked = await acquireLock();
-
-  if (!locked) {
-    console.log('⏳ Sync skipped (another instance)');
-    return;
-  }
+  if (!locked) return;
 
   isSyncRunning = true;
 
   try {
-    console.log('🚀 Maria Sync started');
-
     await syncVehicles();
     await syncDevices();
     await syncTelemetry();
-
-    console.log('✅ Maria Sync completed');
-
-  } catch (err) {
-    console.error('❌ runMariaSync fatal error:', err.message);
   } finally {
     isSyncRunning = false;
     await releaseLock();
