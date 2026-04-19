@@ -2,15 +2,30 @@
 import { getChannel } from './connection.js';
 import { EXCHANGE, QUEUES } from './config.js';
 
+/**
+ * Safe JSON serializer to handle BigInt values
+ */
+function safeStringify(payload) {
+  return JSON.stringify(payload, (_, value) =>
+    typeof value === 'bigint' ? value.toString() : value
+  );
+}
+
 function publish(routingKey, payload) {
   try {
     const channel = getChannel();
+
     const ok = channel.publish(
       EXCHANGE,
       routingKey,
-      Buffer.from(JSON.stringify(payload)),
-      { persistent: true, contentType: 'application/json', timestamp: Date.now() }
+      Buffer.from(safeStringify(payload)), // ✅ FIX APPLIED HERE
+      {
+        persistent: true,
+        contentType: 'application/json',
+        timestamp: Date.now()
+      }
     );
+
     if (!ok) console.warn(`[Publisher] Backpressure on: ${routingKey}`);
     return ok;
   } catch (err) {
@@ -25,7 +40,7 @@ function publish(routingKey, payload) {
  * One message = up to INSERT_BATCH rows (default 100).
  * Primary publish path — called by mariaSync.service.js.
  *
- * @param {object[]} rows  - array of mapped telemetry objects
+ * @param {object[]} rows
  */
 export function publishTelemetryBatch(rows) {
   return publish(QUEUES.TELEMETRY.routingKey, { batch: rows });
@@ -36,7 +51,7 @@ export function publishTelemetryBatch(rows) {
  * Wrapped in the same { batch } envelope so the consumer handles both uniformly.
  *
  * @param {string} deviceId
- * @param {object} data  - { latitude, longitude, speed, ignition, recordedAt }
+ * @param {object} data
  */
 export function publishTelemetry(deviceId, data) {
   return publish(QUEUES.TELEMETRY.routingKey, {
@@ -55,7 +70,7 @@ export function publishTelemetry(deviceId, data) {
  * Publish an alert event.
  *
  * @param {string} deviceId
- * @param {object} alert  - { type, severity, message }
+ * @param {object} alert
  */
 export function publishAlert(deviceId, alert) {
   return publish(QUEUES.ALERTS.routingKey, {
