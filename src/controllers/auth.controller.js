@@ -184,7 +184,7 @@ export async function login(req, res) {
       },
     });
   } catch (error) {
-    console.error("login error:", error);
+    console.error("❌ LOGIN ERROR FULL:", error);
     return res.status(500).json({
       success: false,
       message: "Failed to login",
