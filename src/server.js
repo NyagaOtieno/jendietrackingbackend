@@ -67,6 +67,9 @@ global.__MARIASYNC_RUNNING__ = global.__MARIASYNC_RUNNING__ || false;
  */
 const allowedOrigins = [
   'https://trackingfrontend.vercel.app',
+   'http://localhost:5173',
+  'http://localhost:8080',
+  'http://127.0.0.1:5173',
   ...(process.env.FRONTEND_ORIGIN
     ? process.env.FRONTEND_ORIGIN.split(',').map(s => s.trim())
     : [])
