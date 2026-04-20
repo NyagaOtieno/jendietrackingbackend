@@ -57,11 +57,12 @@ export function publishTelemetry(deviceId, data) {
   return publish(QUEUES.TELEMETRY.routingKey, {
     batch: [{
       deviceId,
-      latitude:   data.latitude   ?? null,
-      longitude:  data.longitude  ?? null,
-      speed:      data.speed      ?? null,
-      ignition:   data.ignition   ?? false,
-      signalTime: data.recordedAt ?? new Date().toISOString(),
+      latitude: data.latitude ?? null,
+      longitude: data.longitude ?? null,
+      speedKph: data.speedKph ?? data.speed ?? 0,
+      heading: data.heading ?? null,
+      ignition: data.ignition ?? false,
+      deviceTime: data.deviceTime ?? new Date().toISOString(),
     }],
   });
 }

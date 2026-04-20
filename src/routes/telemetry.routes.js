@@ -30,7 +30,15 @@ const router = express.Router();
  */
 router.post('/', deviceAuth, (req, res) => {
   const deviceId = req.device.id;
-  const { latitude, longitude, speed, ignition, recordedAt, alert } = req.body;
+
+  const {
+    latitude,
+    longitude,
+    speed,
+    ignition,
+    recordedAt,
+    alert
+  } = req.body;
 
   if (latitude == null || longitude == null) {
     return res.status(400).json({
@@ -39,32 +47,48 @@ router.post('/', deviceAuth, (req, res) => {
     });
   }
 
-  // Publish telemetry — fire and forget
-  const queued = publishTelemetry(deviceId, { latitude, longitude, speed, ignition, recordedAt });
+  const payload = {
+    deviceId,
+    latitude,
+    longitude,
+    speedKph: speed ?? 0,
+    ignition: ignition ?? false,
+    deviceTime: recordedAt ?? new Date().toISOString(),
+  };
 
-  // Publish alert if present
+  const queued = publishTelemetry(deviceId, payload);
+
+  // ✅ REAL-TIME FIX (THIS IS WHAT YOU WERE MISSING)
+  try {
+    global.io?.emit('vehicle:update', payload);
+  } catch (e) {}
+
   if (alert && queued) {
     publishAlert(deviceId, alert);
   }
 
   if (!queued) {
-    // Queue not ready yet (RabbitMQ still starting) — fall back to direct insert
-   pgPool.query(
-  `INSERT INTO telemetry (
-    device_id, latitude, longitude, speed, heading, recorded_at
-  ) VALUES ($1,$2,$3,$4,$5,$6)`,
-  [
-    deviceId,
-    latitude,
-    longitude,
-    speed ?? null,
-    null, // heading missing from device input
-    recordedAt ?? new Date().toISOString()
-  ]
-).catch(err => console.error('[Telemetry] Fallback insert failed:', err.message));
+    pgPool.query(
+      `INSERT INTO telemetry (
+        device_id, latitude, longitude, speed_kph, heading, device_time
+      ) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [
+        deviceId,
+        latitude,
+        longitude,
+        speed ?? 0,
+        null,
+        recordedAt ?? new Date().toISOString()
+      ]
+    ).catch(err =>
+      console.error('[Telemetry] Fallback insert failed:', err.message)
+    );
   }
 
-  res.status(202).json({ success: true, message: 'Telemetry received' });
+  return res.status(202).json({
+    success: true,
+    message: 'Telemetry received'
+  });
 });
 
 // ─── Admin / Staff: Get latest telemetry per device (GET) ────────────────────
@@ -72,48 +96,59 @@ router.post('/', deviceAuth, (req, res) => {
 router.get('/latest', requireAuth, async (req, res) => {
   try {
     const { limit = 100, accountId, deviceId } = req.query;
+
     const values = [];
     let where = '';
 
     if (accountId) {
       values.push(accountId);
-      where += `WHERE d.account_id = $${values.length} `;
+      where += `AND d.account_id = $${values.length} `;
     }
 
     if (deviceId) {
       values.push(deviceId);
-      where += where
-        ? `AND t.device_id = $${values.length} `
-        : `WHERE t.device_id = $${values.length} `;
+      where += `AND t.device_id = $${values.length} `;
     }
 
- const limitVal = Math.min(parseInt(limit) || 100, 500);
-    values.push(limitVal);
+    values.push(Math.min(parseInt(limit) || 100, 500));
 
     const result = await pgPool.query(
-      `SELECT
-         t.device_id,
-         d.device_uid,
-         t.latitude,
-         t.longitude,
-         t.speed_kph   AS speed,
-         t.heading,
-         t.device_time AS recorded_at,
-         v.plate_number,
-         v.serial
-       FROM (
-         SELECT DISTINCT ON (device_id)
-           device_id, latitude, longitude, speed_kph, heading, device_time
-         FROM telemetry
-         ORDER BY device_id, device_time DESC NULLS LAST
-       ) t
-       LEFT JOIN devices d ON d.id = t.device_id
-       LEFT JOIN vehicles v ON v.serial = d.serial
-       ${where}
-       LIMIT $${values.length}`,
+      `
+      SELECT
+        t.device_id,
+        d.device_uid,
+        t.latitude,
+        t.longitude,
+        t.speed_kph AS speed,
+        t.heading,
+        t.device_time AS recorded_at,
+        v.plate_number,
+        v.serial
+      FROM telemetry t
+      LEFT JOIN devices d ON d.id = t.device_id
+      LEFT JOIN vehicles v ON v.serial = d.serial
+      WHERE t.id IN (
+        SELECT MAX(id)
+        FROM telemetry
+        GROUP BY device_id
+      )
+      ${where}
+      LIMIT $${values.length}
+      `,
       values
     );
-    res.json({ success: true, data: result.rows });
+
+    res.json({
+      success: true,
+      data: result.rows.map(r => ({
+        ...r,
+        // normalize output (prevents frontend bugs)
+        latitude: Number(r.latitude),
+        longitude: Number(r.longitude),
+        speed: Number(r.speed || 0),
+        heading: Number(r.heading || 0),
+      })),
+    });
   } catch (err) {
     console.error('Telemetry fetch error:', err);
     res.status(500).json({ success: false, message: err.message });

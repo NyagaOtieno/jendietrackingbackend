@@ -54,18 +54,23 @@ async function bulkInsertTelemetry(rows) {
 
   const values = rows.flatMap(r => [
     r.deviceId,
-    Number(r.latitude)  || 0,
+    Number(r.latitude) || 0,
     Number(r.longitude) || 0,
-    r.speedKph  != null ? Number(r.speedKph)  : null,
-    r.heading   != null ? Number(r.heading)   : null,
-    r.deviceTime ? new Date(r.deviceTime) : null,
+    Number(r.speedKph ?? r.speed ?? 0),
+    Number(r.heading) || null,
+    r.deviceTime ? new Date(r.deviceTime) : new Date(),
   ]);
 
   await pgPool.query(
     `INSERT INTO telemetry (
-       device_id, latitude, longitude, speed_kph, heading, device_time
-     ) VALUES ${placeholders}
-     ON CONFLICT DO NOTHING`,
+      device_id,
+      latitude,
+      longitude,
+      speed_kph,
+      heading,
+      device_time
+    ) VALUES ${placeholders}
+    ON CONFLICT DO NOTHING`,
     values
   );
 }
