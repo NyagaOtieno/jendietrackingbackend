@@ -78,19 +78,20 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: function (origin, callback) {
-      if (!origin) return callback(null, true);
+      if (!origin) return callback(null, true); // allow Postman, curl
 
       if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
 
       console.log('❌ Blocked CORS:', origin);
-      return callback(new Error('CORS blocked: ' + origin));
+
+      // ❗ DO NOT THROW ERROR
+      return callback(null, false);
     },
     credentials: true,
   })
 );
-
 /**
  * =========================
  * MIDDLEWARE
