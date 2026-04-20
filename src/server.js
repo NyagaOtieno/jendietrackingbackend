@@ -2,16 +2,25 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+/**
+ * =========================
+ * MUST BE FIRST (BigInt fix)
+ * =========================
+ */
+BigInt.prototype.toJSON = function () {
+  return this.toString();
+};
+
 import express from 'express';
 import cors from 'cors';
 import cron from 'node-cron';
 import http from 'http';
 
 import { initWebSocket } from './socket/server.js';
-
 import { testDbConnection } from './config/db.js';
 import { initQueue } from './queue/index.js';
 import { runMariaSync } from './services/mariaSync.service.js';
+import { startTelemetryBufferWorker } from './workers/telemetryBufferWorker.js';
 
 // routes
 import positionsRoutes from './routes/positions.routes.js';
@@ -23,34 +32,28 @@ import accountsRoutes from './routes/accounts.routes.js';
 import vehiclesRoutes from './routes/vehicles.routes.js';
 import syncRoutes from './routes/sync.routes.js';
 import telemetryRoutes from './routes/telemetry.routes.js';
-import { startTelemetryBufferWorker } from './workers/telemetryBufferWorker.js';
 
-
+/**
+ * =========================
+ * START BACKGROUND WORKER
+ * =========================
+ */
 startTelemetryBufferWorker();
 
-// FIX: BigInt JSON serialization crash
-BigInt.prototype.toJSON = function () {
-  return this.toString();
-};
-
+/**
+ * =========================
+ * APP + SERVER
+ * =========================
+ */
 const app = express();
-
-/**
- * =========================
- * HTTP + WS SERVER
- * =========================
- */
 const server = http.createServer(app);
-const io = initWebSocket(server); // ✅ SINGLE INIT ONLY
+const io = initWebSocket(server);
 
-/**
- * expose globally for services (safe pattern)
- */
 global.io = io;
 
 /**
  * =========================
- * SAFETY LOCKS
+ * STATE FLAGS
  * =========================
  */
 let isRunning = false;
@@ -72,7 +75,6 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Allow server-to-server / mobile / postman
       if (!origin) return callback(null, true);
 
       if (allowedOrigins.includes(origin)) {
@@ -100,7 +102,7 @@ app.use((req, _res, next) => {
 
 /**
  * =========================
- * HEALTH
+ * HEALTH CHECK
  * =========================
  */
 app.get('/health', async (_req, res) => {
@@ -138,7 +140,7 @@ app.use('/api/telemetry', telemetryRoutes);
 
 /**
  * =========================
- * 404
+ * 404 HANDLER
  * =========================
  */
 app.use((req, res) => {
@@ -163,7 +165,7 @@ app.use((error, _req, res, _next) => {
 
 /**
  * =========================
- * CRON JOB (SAFE SINGLE RUN)
+ * MARIA SYNC CRON JOB
  * =========================
  */
 export function startMariaSyncJob() {
@@ -177,7 +179,6 @@ export function startMariaSyncJob() {
   cronStarted = true;
 
   const schedule = process.env.SYNC_CRON || '*/5 * * * *';
-
   console.log(`📦 Maria sync scheduled: ${schedule}`);
 
   cron.schedule(schedule, async () => {
@@ -204,18 +205,25 @@ export function startMariaSyncJob() {
 
 /**
  * =========================
- * GRACEFUL SHUTDOWN
+ * GRACEFUL SHUTDOWN (FIXED)
  * =========================
  */
-process.on('SIGINT', () => {
-  console.log('🛑 SIGINT received');
-  server.close(() => process.exit(0));
-});
+function gracefulShutdown(signal) {
+  console.log(`🛑 ${signal} received`);
 
-process.on('SIGTERM', () => {
-  console.log('🛑 SIGTERM received');
-  server.close(() => process.exit(0));
-});
+  server.close(() => {
+    console.log('✅ HTTP server closed');
+
+    // allow cleanup time (queues, sockets, etc.)
+    setTimeout(() => {
+      console.log('👋 Process exiting cleanly');
+      process.exit(0);
+    }, 1000);
+  });
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 /**
  * =========================
@@ -230,7 +238,7 @@ async function startServer() {
       await testDbConnection();
       console.log('✅ Database connected');
     } catch (err) {
-      console.log('⚠️ DB failed but continuing');
+      console.log('⚠️ DB failed but continuing:', err.message);
     }
 
     await initQueue().catch(err =>
