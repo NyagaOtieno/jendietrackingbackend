@@ -67,7 +67,7 @@ global.__MARIASYNC_RUNNING__ = global.__MARIASYNC_RUNNING__ || false;
  */
 const allowedOrigins = [
   'https://trackingfrontend.vercel.app',
-   'http://localhost:5173',
+  'http://localhost:5173',
   'http://localhost:8080',
   'http://127.0.0.1:5173',
   ...(process.env.FRONTEND_ORIGIN
@@ -78,15 +78,18 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: function (origin, callback) {
-      if (!origin) return callback(null, true); // allow Postman, curl
+      if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
+      if (
+        allowedOrigins.includes(origin) ||
+        origin.includes('vercel.app') // allow preview deployments
+      ) {
         return callback(null, true);
       }
 
       console.log('❌ Blocked CORS:', origin);
 
-      // ❗ DO NOT THROW ERROR
+      // ✅ DO NOT THROW ERROR
       return callback(null, false);
     },
     credentials: true,
