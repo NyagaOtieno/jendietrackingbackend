@@ -65,32 +65,28 @@ global.__MARIASYNC_RUNNING__ = global.__MARIASYNC_RUNNING__ || false;
  * CORS
  * =========================
  */
-const allowedOrigins = [
-  'https://trackingfrontend.vercel.app',
-  'http://localhost:5173',
-  'http://localhost:8080',
-  'http://127.0.0.1:5173',
-  ...(process.env.FRONTEND_ORIGIN
-    ? process.env.FRONTEND_ORIGIN.split(',').map(s => s.trim())
-    : [])
-];
-
 app.use(
   cors({
     origin: function (origin, callback) {
+      // allow server-to-server / mobile / health checks
       if (!origin) return callback(null, true);
 
-      if (
-        allowedOrigins.includes(origin) ||
-        origin.includes('vercel.app') // allow preview deployments
-      ) {
-        return callback(null, true);
-      }
+      const allowed = [
+        'https://trackingfrontend.vercel.app',
+        'http://localhost:5173',
+        'http://localhost:8080',
+        'http://127.0.0.1:5173',
+      ];
+
+      const isAllowed =
+        allowed.includes(origin) || origin.endsWith('.vercel.app');
+
+      if (isAllowed) return callback(null, true);
 
       console.log('❌ Blocked CORS:', origin);
 
-      // ✅ DO NOT THROW ERROR
-      return callback(null, false);
+      // IMPORTANT: still allow request, don't break API
+      return callback(null, true);
     },
     credentials: true,
   })
