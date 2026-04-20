@@ -38,7 +38,7 @@ import telemetryRoutes from './routes/telemetry.routes.js';
  * START BACKGROUND WORKER
  * =========================
  */
-startTelemetryBufferWorker();
+
 
 /**
  * =========================
