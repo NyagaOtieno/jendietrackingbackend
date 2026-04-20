@@ -25,7 +25,13 @@ import syncRoutes from './routes/sync.routes.js';
 import telemetryRoutes from './routes/telemetry.routes.js';
 import { startTelemetryBufferWorker } from './workers/telemetryBufferWorker.js';
 
+
 startTelemetryBufferWorker();
+
+// FIX: BigInt JSON serialization crash
+BigInt.prototype.toJSON = function () {
+  return this.toString();
+};
 
 const app = express();
 
