@@ -6,7 +6,6 @@ import { pgPool } from '../config/db.js';
 import { publishTelemetryBatch, publishAlert } from '../queue/publisher.js';
 import { setLatestPosition } from '../services/cache.service.js';
 import { getIO } from '../socket/server.js';
-import { safeJSON } from "../utils/safe-json.js";
 
 let isSyncRunning = false;
 export { isSyncRunning };
@@ -23,6 +22,16 @@ const mariaPool = createPool({
 
 const DEVICE_CONCURRENCY = Number(process.env.DEVICE_CONCURRENCY || 25);
 
+// ✅ SAFE NUMBER HANDLER (fixes BigInt issue globally)
+function toSafeNumber(val) {
+  if (val === null || val === undefined) return null;
+  if (typeof val === 'bigint') return Number(val);
+  return Number(val);
+}
+
+// =====================
+// LOCKS
+// =====================
 async function acquireLock() {
   const res = await pgPool.query("SELECT pg_try_advisory_lock(778899) AS locked");
   return res.rows[0].locked;
@@ -45,7 +54,7 @@ async function getMariaConnection(retries = 3) {
 }
 
 // =====================
-// 1. VEHICLES + DEVICES
+// VEHICLES + DEVICES
 // =====================
 export async function syncVehicles() {
   let conn;
@@ -59,8 +68,7 @@ export async function syncVehicles() {
         r.vmodel,
         r.install_date,
         r.pstatus,
-        d.id        AS device_id,
-        d.uniqueid  AS device_uid
+        d.uniqueid AS device_uid
       FROM registration r
       LEFT JOIN device d ON d.uniqueid = CONCAT('0', r.serial)
     `);
@@ -72,16 +80,17 @@ export async function syncVehicles() {
       if (!r.serial) continue;
 
       const serial = String(r.serial).trim();
-      const plate = (r.reg_no || "PLATE_" + serial).toString().trim().substring(0, 100);
+      const plate = (r.reg_no || "PLATE_" + serial).toString().trim();
 
       await pgPool.query(
         `INSERT INTO vehicles (serial, plate_number, unit_name, model, status, created_at)
          VALUES ($1,$2,$3,$4,$5,$6)
-         ON CONFLICT (serial) DO UPDATE
-         SET plate_number = EXCLUDED.plate_number,
-             unit_name = EXCLUDED.unit_name,
-             model = EXCLUDED.model,
-             status = EXCLUDED.status`,
+         ON CONFLICT (serial)
+         DO UPDATE SET
+           plate_number = EXCLUDED.plate_number,
+           unit_name = EXCLUDED.unit_name,
+           model = EXCLUDED.model,
+           status = EXCLUDED.status`,
         [serial, plate, "Unit " + serial, r.vmodel || "", r.pstatus || "inactive", r.install_date || new Date()]
       );
 
@@ -99,14 +108,14 @@ export async function syncVehicles() {
       }
     }
 
-    console.log("✅ Vehicles synced:", vehicleCount, "| Devices linked:", deviceCount);
+    console.log("✅ Vehicles synced:", vehicleCount, "| Devices:", deviceCount);
   } finally {
     conn?.release();
   }
 }
 
 // =====================
-// 2. TELEMETRY PER DEVICE
+// TELEMETRY PER DEVICE
 // =====================
 async function syncDeviceTelemetry(device, conn) {
   try {
@@ -119,7 +128,7 @@ async function syncDeviceTelemetry(device, conn) {
     );
     if (!devRes.length) return { count: 0, maxId: lastId };
 
-    const mariaDeviceId = Number(devRes[0].id);
+    const mariaDeviceId = toSafeNumber(devRes[0].id);
 
     const pgRes = await pgPool.query(
       "SELECT id FROM devices WHERE device_uid = $1 LIMIT 1",
@@ -127,14 +136,13 @@ async function syncDeviceTelemetry(device, conn) {
     );
     if (!pgRes.rows.length) return { count: 0, maxId: lastId };
 
-    const pgDeviceId = Number(pgRes.rows[0].id);
+    const pgDeviceId = pgRes.rows[0].id;
 
     const rows = await conn.query(
       `SELECT id, servertime, devicetime, latitude, longitude, speed, course, alarmcode
        FROM eventData
        WHERE deviceid = ? AND id > ?
-       ORDER BY id ASC
-       LIMIT 5000`,
+       ORDER BY id ASC LIMIT 5000`,
       [mariaDeviceId, lastId]
     );
 
@@ -143,34 +151,31 @@ async function syncDeviceTelemetry(device, conn) {
     let maxId = lastId;
 
     const mapped = rows.map(r => {
-      const eventId = Number(r.id);
-
+      const eventId = toSafeNumber(r.id);
       if (eventId > maxId) maxId = eventId;
 
       return {
-        pgDeviceId,
-        deviceUid: String(deviceUid),
-
-        receivedAt: new Date(r.servertime),
+        deviceId: pgDeviceId,
+        deviceUid,
+        latitude: toSafeNumber(r.latitude),
+        longitude: toSafeNumber(r.longitude),
+        speedKph: toSafeNumber(r.speed),
+        heading: toSafeNumber(r.course),
         deviceTime: r.devicetime ? new Date(r.devicetime) : null,
-
-        latitude: Number(r.latitude) || 0,
-        longitude: Number(r.longitude) || 0,
-        speedKph: Number(r.speed) || 0,
-        heading: Number(r.course) || 0,
-
         alarmcode: r.alarmcode || null,
-        eventId,
+
+        // ✅ CRITICAL FIX
+        eventId: String(eventId),
       };
     });
 
-    // DB insert
+    // INSERT
     if (mapped.length) {
       const values = [];
       const placeholders = mapped.map((r, i) => {
         const b = i * 6;
         values.push(
-          r.pgDeviceId,
+          r.deviceId,
           r.latitude,
           r.longitude,
           r.speedKph,
@@ -181,16 +186,17 @@ async function syncDeviceTelemetry(device, conn) {
       });
 
       await pgPool.query(
-        `INSERT INTO telemetry (device_id, latitude, longitude, speed_kph, heading, device_time)
+        `INSERT INTO telemetry
+         (device_id, latitude, longitude, speed_kph, heading, device_time)
          VALUES ${placeholders.join(",")}
          ON CONFLICT DO NOTHING`,
         values
       );
     }
 
-    // ✅ FIX: safe publish (NO BigInt)
+    // QUEUE
     try {
-      publishTelemetryBatch(safeJSON(mapped));
+      publishTelemetryBatch(mapped);
     } catch {}
 
     let io;
@@ -199,28 +205,23 @@ async function syncDeviceTelemetry(device, conn) {
     for (const r of mapped) {
       try { await setLatestPosition(r.deviceUid, r); } catch {}
 
-      if (io) {
-        io.emit("vehicle:update", safeJSON({
-          deviceId: r.deviceUid,
-          ...r,
-        }));
-      }
+      if (io) io.emit("vehicle:update", r);
 
       if (r.alarmcode) {
         const alert = {
           deviceId: r.deviceUid,
           type: "alarm",
           severity: "warning",
-          message: "Alarm: " + r.alarmcode,
+          message: "Alarm: " + r.alarmcode
         };
 
         try { publishAlert(r.deviceUid, alert); } catch {}
-
-        if (io) io.emit("alert", safeJSON(alert));
+        if (io) io.emit("alert", alert);
       }
     }
 
     return { count: mapped.length, maxId };
+
   } catch (err) {
     console.error("❌ Device", device.device_uid, "error:", err.message);
     return { count: 0, maxId: device.positionid || 0 };
@@ -228,7 +229,7 @@ async function syncDeviceTelemetry(device, conn) {
 }
 
 // =====================
-// 3. TELEMETRY ORCHESTRATOR
+// ORCHESTRATOR
 // =====================
 export async function syncTelemetry() {
   let conn;
@@ -264,23 +265,20 @@ export async function syncTelemetry() {
             [res.value.maxId, dev.device_uid]
           );
 
-          console.log("📦", dev.device_uid, "→", res.value.count, "rows");
-        }
-
-        if (res.status === "rejected") {
-          console.error("❌", dev.device_uid, ":", res.reason?.message);
+          console.log("📦", dev.device_uid, "→", res.value.count);
         }
       }
     }
 
-    console.log("✅ Telemetry sync complete:", total, "rows");
+    console.log("✅ Telemetry sync complete:", total);
+
   } finally {
     conn?.release();
   }
 }
 
 // =====================
-// 4. RUNNER
+// RUNNER
 // =====================
 export async function runMariaSync() {
   if (isSyncRunning) return;
