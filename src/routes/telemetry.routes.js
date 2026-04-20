@@ -8,81 +8,121 @@ const router = express.Router();
 
 /**
  * =========================
+ * VALIDATION HELPERS
+ * =========================
+ */
+const isValidLatLng = (lat, lng) => {
+  const la = Number(lat);
+  const ln = Number(lng);
+
+  return (
+    Number.isFinite(la) &&
+    Number.isFinite(ln) &&
+    la >= -90 &&
+    la <= 90 &&
+    ln >= -180 &&
+    ln <= 180
+  );
+};
+
+const normalizeNumber = (v, fallback = 0) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+/**
+ * =========================
  * DEVICE INGEST (FAST PATH)
  * =========================
  */
-router.post('/', deviceAuth, (req, res) => {
-  const deviceId = req.device.id;
+router.post('/', deviceAuth, async (req, res) => {
+  try {
+    const deviceId = req.device.id;
 
-  const {
-    latitude,
-    longitude,
-    speed,
-    ignition,
-    recordedAt,
-    alert
-  } = req.body;
+    const {
+      latitude,
+      longitude,
+      speed,
+      ignition,
+      recordedAt,
+      alert
+    } = req.body;
 
-  if (latitude == null || longitude == null) {
-    return res.status(400).json({
+    // ❗ Critical validation (prevents bad map points like China coordinate)
+    if (!isValidLatLng(latitude, longitude)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid latitude/longitude'
+      });
+    }
+
+    const payload = {
+      deviceId,
+      latitude: normalizeNumber(latitude),
+      longitude: normalizeNumber(longitude),
+      speedKph: normalizeNumber(speed),
+      ignition: Boolean(ignition),
+      deviceTime: recordedAt || new Date().toISOString(),
+    };
+
+    const queued = publishTelemetry(deviceId, payload);
+
+    // realtime push (safe)
+    if (global.io) {
+      global.io.emit('vehicle:update', payload);
+    }
+
+    if (alert && queued) {
+      publishAlert(deviceId, alert);
+    }
+
+    // fallback DB insert if queue fails
+    if (!queued) {
+      try {
+        await pgPool.query(
+          `INSERT INTO telemetry
+            (device_id, latitude, longitude, speed_kph, heading, device_time)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [
+            deviceId,
+            payload.latitude,
+            payload.longitude,
+            payload.speedKph,
+            null,
+            payload.deviceTime
+          ]
+        );
+      } catch (dbErr) {
+        console.error('[Telemetry fallback insert error]', dbErr.message);
+      }
+    }
+
+    return res.status(202).json({
+      success: true,
+      message: 'Telemetry received'
+    });
+
+  } catch (err) {
+    console.error('Telemetry ingest error:', err);
+    return res.status(500).json({
       success: false,
-      message: 'latitude and longitude are required',
+      message: 'Internal server error'
     });
   }
-
-  const payload = {
-    deviceId,
-    latitude: Number(latitude),
-    longitude: Number(longitude),
-    speedKph: Number(speed || 0),
-    ignition: Boolean(ignition),
-    deviceTime: recordedAt || new Date().toISOString(),
-  };
-
-  const queued = publishTelemetry(deviceId, payload);
-
-  // realtime push (safe)
-  if (global.io) {
-    global.io.emit('vehicle:update', payload);
-  }
-
-  if (alert && queued) {
-    publishAlert(deviceId, alert);
-  }
-
-  // fallback DB insert if queue fails
-  if (!queued) {
-    pgPool.query(
-      `INSERT INTO telemetry
-        (device_id, latitude, longitude, speed_kph, heading, device_time)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [
-        deviceId,
-        payload.latitude,
-        payload.longitude,
-        payload.speedKph,
-        null,
-        payload.deviceTime
-      ]
-    ).catch(err =>
-      console.error('[Telemetry fallback insert error]', err.message)
-    );
-  }
-
-  return res.status(202).json({
-    success: true,
-    message: 'Telemetry received'
-  });
 });
 
 /**
  * =========================
- * FIXED: LATEST TELEMETRY (IMPORTANT FIX)
+ * FIXED: LATEST TELEMETRY
  * =========================
  */
 router.get('/latest', requireAuth, async (req, res) => {
   try {
-    const { limit = 200, accountId, deviceId } = req.query;
+    const {
+      limit = 200,
+      accountId,
+      deviceId
+    } = req.query;
 
     const values = [];
     const where = [];
@@ -100,6 +140,8 @@ router.get('/latest', requireAuth, async (req, res) => {
     const whereClause = where.length
       ? `WHERE ${where.join(' AND ')}`
       : '';
+
+    const safeLimit = Math.min(Math.max(parseInt(limit) || 200, 1), 500);
 
     const result = await pgPool.query(
       `
@@ -120,25 +162,30 @@ router.get('/latest', requireAuth, async (req, res) => {
       ORDER BY t.device_id, t.device_time DESC
       LIMIT $${values.length + 1}
       `,
-      [...values, Math.min(Number(limit) || 200, 500)]
+      [...values, safeLimit]
     );
 
-    res.json({
-      success: true,
-      data: result.rows.map(r => ({
+    const cleaned = result.rows
+      .map(r => ({
         ...r,
-        latitude: Number(r.latitude),
-        longitude: Number(r.longitude),
-        speed: Number(r.speed || 0),
-        heading: Number(r.heading || 0),
-      })),
+        latitude: normalizeNumber(r.latitude, null),
+        longitude: normalizeNumber(r.longitude, null),
+        speed: normalizeNumber(r.speed),
+        heading: normalizeNumber(r.heading),
+      }))
+      // ❗ removes bad map points (fixes your “wrong location / disappearing vehicles” issue)
+      .filter(r => isValidLatLng(r.latitude, r.longitude));
+
+    return res.json({
+      success: true,
+      data: cleaned
     });
 
   } catch (err) {
     console.error('❌ Latest telemetry error:', err);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: err.message
+      message: 'Failed to fetch telemetry'
     });
   }
 });
@@ -161,16 +208,16 @@ router.get('/my/latest', deviceAuth, async (req, res) => {
       [req.device.id]
     );
 
-    res.json({
+    return res.json({
       success: true,
       data: result.rows[0] || null
     });
 
   } catch (err) {
     console.error('Device telemetry error:', err);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: err.message
+      message: 'Failed to fetch device telemetry'
     });
   }
 });
