@@ -87,22 +87,32 @@ router.get('/latest', requireAuth, async (req, res) => {
         : `WHERE t.device_id = $${values.length} `;
     }
 
- const result = await pgPool.query(
-  `SELECT t.device_id,
-          t.latitude,
-          t.longitude,
-          t.speed,
-          t.heading,
-          t.recorded_at,
-          v.plate_number
-   FROM telemetry t
-   LEFT JOIN devices d ON d.id = t.device_id
-   LEFT JOIN vehicles v ON v.id = d.vehicle_id
-   WHERE t.device_id = $1
-   ORDER BY t.recorded_at DESC
-   LIMIT 1`,
-  [req.device.id]
-);
+ const limitVal = Math.min(parseInt(limit) || 100, 500);
+    values.push(limitVal);
+
+    const result = await pgPool.query(
+      `SELECT
+         t.device_id,
+         d.device_uid,
+         t.latitude,
+         t.longitude,
+         t.speed_kph   AS speed,
+         t.heading,
+         t.device_time AS recorded_at,
+         v.plate_number,
+         v.serial
+       FROM (
+         SELECT DISTINCT ON (device_id)
+           device_id, latitude, longitude, speed_kph, heading, device_time
+         FROM telemetry
+         ORDER BY device_id, device_time DESC NULLS LAST
+       ) t
+       LEFT JOIN devices d ON d.id = t.device_id
+       LEFT JOIN vehicles v ON v.serial = d.serial
+       ${where}
+       LIMIT $${values.length}`,
+      values
+    );
     res.json({ success: true, data: result.rows });
   } catch (err) {
     console.error('Telemetry fetch error:', err);

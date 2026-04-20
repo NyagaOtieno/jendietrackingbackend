@@ -56,11 +56,26 @@ global.__MARIASYNC_RUNNING__ = global.__MARIASYNC_RUNNING__ || false;
  * CORS
  * =========================
  */
+const allowedOrigins = [
+  'https://trackingfrontend.vercel.app',
+  ...(process.env.FRONTEND_ORIGIN
+    ? process.env.FRONTEND_ORIGIN.split(',').map(s => s.trim())
+    : [])
+];
+
 app.use(
   cors({
-    origin: process.env.FRONTEND_ORIGIN
-      ? process.env.FRONTEND_ORIGIN.split(',').map(s => s.trim())
-      : '*',
+    origin: function (origin, callback) {
+      // Allow server-to-server / mobile / postman
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      console.log('❌ Blocked CORS:', origin);
+      return callback(new Error('CORS blocked: ' + origin));
+    },
     credentials: true,
   })
 );
