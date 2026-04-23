@@ -33,7 +33,7 @@ async function acquireLock() {
   const res = await pgPool.query(
     "SELECT pg_try_advisory_lock(778899) AS locked"
   );
-  return res.rows[0]?.locked;
+  return res.rows?.[0]?.locked === true;
 }
 
 async function releaseLock() {
@@ -41,7 +41,7 @@ async function releaseLock() {
 }
 
 // ─────────────────────────────────────────────
-// SAFE CONNECTION
+// SAFE MARIA CONNECTION
 // ─────────────────────────────────────────────
 async function getMariaConnection(retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -76,14 +76,15 @@ export async function syncVehicles() {
     let devices = 0;
 
     for (const r of rows) {
-      if (!r.serial) continue;
+      const serial = String(r.serial || "").trim();
+      if (!serial) continue;
 
-      const serial = String(r.serial).trim();
-      const plate = (r.reg_no || `PLATE_${serial}`).substring(0, 100);
+      const plate = String(r.reg_no || `PLATE_${serial}`).substring(0, 100);
 
       await pgPool.query(
         `
-        INSERT INTO vehicles (serial, plate_number, unit_name, model, status, created_at)
+        INSERT INTO vehicles
+        (serial, plate_number, unit_name, model, status, created_at)
         VALUES ($1,$2,$3,$4,$5,$6)
         ON CONFLICT (serial) DO UPDATE SET
           plate_number = EXCLUDED.plate_number,
@@ -112,6 +113,7 @@ export async function syncVehicles() {
           `,
           [String(r.device_uid), serial]
         );
+
         devices++;
       }
     }
@@ -123,7 +125,7 @@ export async function syncVehicles() {
 }
 
 // ─────────────────────────────────────────────
-// DEVICE SYNC
+// DEVICE TELEMETRY SYNC
 // ─────────────────────────────────────────────
 async function syncDeviceTelemetry(device, conn) {
   try {
@@ -152,7 +154,8 @@ async function syncDeviceTelemetry(device, conn) {
              speed, course, alarmcode
       FROM eventData
       WHERE deviceid = ? AND id > ?
-      ORDER BY id ASC LIMIT 2000
+      ORDER BY id ASC
+      LIMIT 2000
       `,
       [mariaDeviceId, lastId]
     );
@@ -162,7 +165,6 @@ async function syncDeviceTelemetry(device, conn) {
     let maxId = lastId;
     const values = [];
     const placeholders = [];
-
     const validRows = [];
 
     for (const r of rows) {
@@ -171,7 +173,9 @@ async function syncDeviceTelemetry(device, conn) {
       const lat = Number(r.latitude);
       const lon = Number(r.longitude);
 
-      if (!lat || !lon) continue;
+      // strict validation (fixes bad inserts)
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      if (lat === 0 && lon === 0) continue;
 
       const deviceTime =
         r.devicetime && new Date(r.devicetime).getFullYear() > 2000
@@ -190,56 +194,71 @@ async function syncDeviceTelemetry(device, conn) {
       });
     }
 
-    if (validRows.length > 0) {
-      validRows.forEach((r, i) => {
-        values.push(
-          r.pgDeviceId,
-          r.lat,
-          r.lon,
-          r.speed,
-          r.heading,
-          r.deviceTime
-        );
+    if (validRows.length === 0) {
+      return { count: 0, maxId };
+    }
 
-        placeholders.push(
-          `($${i * 6 + 1},$${i * 6 + 2},$${i * 6 + 3},$${i * 6 + 4},$${i * 6 + 5},$${i * 6 + 6})`
-        );
-      });
-
-      await pgPool.query(
-        `
-        INSERT INTO telemetry
-        (device_id, latitude, longitude, speed_kph, heading, device_time)
-        VALUES ${placeholders.join(",")}
-        ON CONFLICT DO NOTHING
-        `,
-        values
+    validRows.forEach((r, i) => {
+      values.push(
+        r.pgDeviceId,
+        r.lat,
+        r.lon,
+        r.speed,
+        r.heading,
+        r.deviceTime
       );
 
-      const latest = validRows[validRows.length - 1];
-
-      await pgPool.query(
-        `
-        INSERT INTO latest_positions
-        (device_id, latitude, longitude, speed_kph, heading, device_time, received_at, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
-        ON CONFLICT (device_id) DO UPDATE SET
-          latitude = EXCLUDED.latitude,
-          longitude = EXCLUDED.longitude,
-          speed_kph = EXCLUDED.speed_kph,
-          heading = EXCLUDED.heading,
-          device_time = EXCLUDED.device_time,
-          updated_at = NOW()
-        `,
-        [
-          latest.pgDeviceId,
-          latest.lat,
-          latest.lon,
-          latest.speed,
-          latest.heading,
-          latest.deviceTime,
-        ]
+      placeholders.push(
+        `($${i * 6 + 1},$${i * 6 + 2},$${i * 6 + 3},$${i * 6 + 4},$${i * 6 + 5},$${i * 6 + 6})`
       );
+    });
+
+    await pgPool.query(
+      `
+      INSERT INTO telemetry
+      (device_id, latitude, longitude, speed_kph, heading, device_time)
+      VALUES ${placeholders.join(",")}
+      ON CONFLICT DO NOTHING
+      `,
+      values
+    );
+
+    const last = validRows[validRows.length - 1];
+
+    await pgPool.query(
+      `
+      INSERT INTO latest_positions
+      (device_id, latitude, longitude, speed_kph, heading, device_time, received_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
+      ON CONFLICT (device_id) DO UPDATE SET
+        latitude = EXCLUDED.latitude,
+        longitude = EXCLUDED.longitude,
+        speed_kph = EXCLUDED.speed_kph,
+        heading = EXCLUDED.heading,
+        device_time = EXCLUDED.device_time,
+        updated_at = NOW()
+      `,
+      [
+        last.pgDeviceId,
+        last.lat,
+        last.lon,
+        last.speed,
+        last.heading,
+        last.deviceTime,
+      ]
+    );
+
+    for (const r of validRows) {
+      if (r.alarmcode) {
+        try {
+          publishAlert(r.deviceUid, {
+            deviceId: r.deviceUid,
+            type: "alarm",
+            severity: "warning",
+            message: `Alarm: ${r.alarmcode}`,
+          });
+        } catch {}
+      }
     }
 
     return { count: validRows.length, maxId };
@@ -271,9 +290,9 @@ export async function syncTelemetry() {
         chunk.map((d) => syncDeviceTelemetry(d, conn))
       );
 
-      for (let i = 0; i < results.length; i++) {
-        if (results[i].status === "fulfilled") {
-          const res = results[i].value;
+      for (let j = 0; j < results.length; j++) {
+        if (results[j].status === "fulfilled") {
+          const res = results[j].value;
 
           total += res.count;
 
@@ -283,7 +302,7 @@ export async function syncTelemetry() {
             SET positionid = GREATEST(positionid, $1)
             WHERE device_uid = $2
             `,
-            [res.maxId, chunk[i].device_uid]
+            [res.maxId, chunk[j].device_uid]
           );
         }
       }
