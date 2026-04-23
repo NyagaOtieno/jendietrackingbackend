@@ -21,9 +21,6 @@ import { testDbConnection } from './config/db.js';
 import { initQueue } from './queue/index.js';
 import { runMariaSync } from './services/mariaSync.service.js';
 
-// ❌ REMOVED (was crashing server)
-// import { startTelemetryBufferWorker } from './workers/telemetryBufferWorker.js';
-
 // routes
 import positionsRoutes from './routes/positions.routes.js';
 import fleetRoutes from './routes/fleet.routes.js';
