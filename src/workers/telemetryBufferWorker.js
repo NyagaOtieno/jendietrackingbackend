@@ -2,86 +2,101 @@ import { pgPool } from '../config/db.js';
 import { publishTelemetryBatch } from '../queue/publisher.js';
 
 let isRunning = false;
+let intervalRef = null;
 
 const BATCH_SIZE = 1000;
 const INTERVAL = 5000;
 const MAX_RETRY = 5;
 
-export async function startTelemetryBufferWorker() {
+export function startTelemetryBufferWorker() {
   console.log('🚀 Telemetry Buffer Worker started');
 
-  setInterval(async () => {
-    if (isRunning) {
-      console.log('⏳ Worker still running, skipping cycle');
+  // prevent double start (PM2 safety)
+  if (intervalRef) {
+    console.log('⚠️ Worker already running');
+    return;
+  }
+
+  intervalRef = setInterval(processBatch, INTERVAL);
+}
+
+/**
+ * =========================
+ * MAIN PROCESS LOOP
+ * =========================
+ */
+async function processBatch() {
+  if (isRunning) return;
+
+  isRunning = true;
+
+  try {
+    const { rows } = await pgPool.query(`
+      SELECT id, payload, retry_count
+      FROM telemetry_ingestion_buffer
+      WHERE status = 'PENDING'
+      ORDER BY created_at ASC
+      LIMIT $1
+    `, [BATCH_SIZE]);
+
+    if (!rows.length) {
+      isRunning = false;
       return;
     }
 
-    isRunning = true;
+    console.log(`📦 Processing ${rows.length} telemetry records`);
 
-    try {
-      const { rows } = await pgPool.query(`
-        SELECT id, payload, retry_count
-        FROM telemetry_ingestion_buffer
-        WHERE status = 'PENDING'
-        ORDER BY created_at ASC
-        LIMIT $1
-      `, [BATCH_SIZE]);
+    const successIds = [];
 
-      if (rows.length === 0) {
-        isRunning = false;
-        return;
-      }
+    for (const row of rows) {
+      try {
+        const payload = JSON.parse(row.payload);
 
-      console.log(`📦 Processing ${rows.length} telemetry items`);
+        await publishTelemetryBatch(payload);
 
-      const successfulIds = [];
-      const failedUpdates = [];
+        successIds.push(row.id);
 
-      for (const row of rows) {
-        try {
-          const payload = JSON.parse(row.payload);
+      } catch (err) {
+        const retry = (row.retry_count || 0) + 1;
+        const status = retry >= MAX_RETRY ? 'FAILED' : 'PENDING';
 
-          await publishTelemetryBatch(payload);
-
-          successfulIds.push(row.id);
-
-        } catch (err) {
-          const newRetry = (row.retry_count || 0) + 1;
-
-          failedUpdates.push({
-            id: row.id,
-            retry: newRetry,
-            status: newRetry > MAX_RETRY ? 'FAILED' : 'PENDING',
-          });
-
-          console.error(`❌ Telemetry failed id=${row.id}`, err.message);
-        }
-      }
-
-      // ✅ Bulk update SUCCESS rows
-      if (successfulIds.length) {
-        await pgPool.query(`
-          UPDATE telemetry_ingestion_buffer
-          SET status='PROCESSED', processed_at=NOW()
-          WHERE id = ANY($1)
-        `, [successfulIds]);
-      }
-
-      // ✅ Bulk update FAILED/PENDING retries
-      for (const f of failedUpdates) {
         await pgPool.query(`
           UPDATE telemetry_ingestion_buffer
           SET retry_count = $2,
               status = $3
           WHERE id = $1
-        `, [f.id, f.retry, f.status]);
-      }
+        `, [row.id, retry, status]);
 
-    } catch (err) {
-      console.error('🔥 Worker cycle error:', err.message);
-    } finally {
-      isRunning = false;
+        console.error(`❌ Failed id=${row.id}:`, err.message);
+      }
     }
 
-  }, INTERVAL);
+    // bulk success update (FAST)
+    if (successIds.length > 0) {
+      await pgPool.query(`
+        UPDATE telemetry_ingestion_buffer
+        SET status = 'PROCESSED',
+            processed_at = NOW()
+        WHERE id = ANY($1)
+      `, [successIds]);
+    }
+
+  } catch (err) {
+    console.error('🔥 Worker crash cycle:', err.message);
+  } finally {
+    isRunning = false;
+  }
+}
+
+/**
+ * =========================
+ * GRACEFUL SHUTDOWN (IMPORTANT)
+ * =========================
+ */
+export function stopTelemetryBufferWorker() {
+  if (intervalRef) {
+    clearInterval(intervalRef);
+    intervalRef = null;
+    console.log('🛑 Telemetry Worker stopped');
+  }
 }
