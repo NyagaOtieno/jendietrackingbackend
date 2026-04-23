@@ -9,6 +9,7 @@ import { publishAlert } from "../queue/publisher.js";
 // STATE
 // ─────────────────────────────────────────────
 let isSyncRunning = false;
+export { isSyncRunning };
 
 // ─────────────────────────────────────────────
 // MARIA DB POOL
@@ -27,13 +28,13 @@ const mariaPool = createPool({
 const DEVICE_CONCURRENCY = Number(process.env.DEVICE_CONCURRENCY || 10);
 
 // ─────────────────────────────────────────────
-// LOCK
+// POSTGRES LOCK
 // ─────────────────────────────────────────────
 async function acquireLock() {
   const res = await pgPool.query(
     "SELECT pg_try_advisory_lock(778899) AS locked"
   );
-  return res.rows?.[0]?.locked === true;
+  return res.rows[0]?.locked;
 }
 
 async function releaseLock() {
@@ -41,7 +42,7 @@ async function releaseLock() {
 }
 
 // ─────────────────────────────────────────────
-// SAFE MARIA CONNECTION
+// MARIA CONNECTION
 // ─────────────────────────────────────────────
 async function getMariaConnection(retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -76,15 +77,12 @@ export async function syncVehicles() {
     let devices = 0;
 
     for (const r of rows) {
-      const serial = String(r.serial || "").trim();
-      if (!serial) continue;
-
-      const plate = String(r.reg_no || `PLATE_${serial}`).substring(0, 100);
+      const serial = String(r.serial).trim();
+      const plate = (r.reg_no || `PLATE_${serial}`).substring(0, 100);
 
       await pgPool.query(
         `
-        INSERT INTO vehicles
-        (serial, plate_number, unit_name, model, status, created_at)
+        INSERT INTO vehicles (serial, plate_number, unit_name, model, status, created_at)
         VALUES ($1,$2,$3,$4,$5,$6)
         ON CONFLICT (serial) DO UPDATE SET
           plate_number = EXCLUDED.plate_number,
@@ -154,8 +152,7 @@ async function syncDeviceTelemetry(device, conn) {
              speed, course, alarmcode
       FROM eventData
       WHERE deviceid = ? AND id > ?
-      ORDER BY id ASC
-      LIMIT 2000
+      ORDER BY id ASC LIMIT 2000
       `,
       [mariaDeviceId, lastId]
     );
@@ -165,6 +162,7 @@ async function syncDeviceTelemetry(device, conn) {
     let maxId = lastId;
     const values = [];
     const placeholders = [];
+
     const validRows = [];
 
     for (const r of rows) {
@@ -173,9 +171,7 @@ async function syncDeviceTelemetry(device, conn) {
       const lat = Number(r.latitude);
       const lon = Number(r.longitude);
 
-      // strict validation (fixes bad inserts)
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      if (lat === 0 && lon === 0) continue;
+      if (!lat || !lon) continue;
 
       const deviceTime =
         r.devicetime && new Date(r.devicetime).getFullYear() > 2000
@@ -199,6 +195,8 @@ async function syncDeviceTelemetry(device, conn) {
     }
 
     validRows.forEach((r, i) => {
+      const b = i * 6;
+
       values.push(
         r.pgDeviceId,
         r.lat,
@@ -209,7 +207,7 @@ async function syncDeviceTelemetry(device, conn) {
       );
 
       placeholders.push(
-        `($${i * 6 + 1},$${i * 6 + 2},$${i * 6 + 3},$${i * 6 + 4},$${i * 6 + 5},$${i * 6 + 6})`
+        `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6})`
       );
     });
 
@@ -223,7 +221,8 @@ async function syncDeviceTelemetry(device, conn) {
       values
     );
 
-    const last = validRows[validRows.length - 1];
+    // ✅ FIXED: ONLY ONE latest declaration (NO DUPLICATES)
+    const latest = validRows[validRows.length - 1];
 
     await pgPool.query(
       `
@@ -239,27 +238,14 @@ async function syncDeviceTelemetry(device, conn) {
         updated_at = NOW()
       `,
       [
-        last.pgDeviceId,
-        last.lat,
-        last.lon,
-        last.speed,
-        last.heading,
-        last.deviceTime,
+        latest.pgDeviceId,
+        latest.lat,
+        latest.lon,
+        latest.speed,
+        latest.heading,
+        latest.deviceTime,
       ]
     );
-
-    for (const r of validRows) {
-      if (r.alarmcode) {
-        try {
-          publishAlert(r.deviceUid, {
-            deviceId: r.deviceUid,
-            type: "alarm",
-            severity: "warning",
-            message: `Alarm: ${r.alarmcode}`,
-          });
-        } catch {}
-      }
-    }
 
     return { count: validRows.length, maxId };
   } catch (err) {
