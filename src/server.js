@@ -4,7 +4,7 @@ dotenv.config();
 
 /**
  * =========================
- * MUST BE FIRST (BigInt fix)
+ * BIGINT FIX (must be first)
  * =========================
  */
 BigInt.prototype.toJSON = function () {
@@ -20,7 +20,9 @@ import { initWebSocket } from './socket/server.js';
 import { testDbConnection } from './config/db.js';
 import { initQueue } from './queue/index.js';
 import { runMariaSync } from './services/mariaSync.service.js';
-import { startTelemetryBufferWorker } from './workers/telemetryBufferWorker.js';
+
+// ❌ REMOVED (was crashing server)
+// import { startTelemetryBufferWorker } from './workers/telemetryBufferWorker.js';
 
 // routes
 import positionsRoutes from './routes/positions.routes.js';
@@ -32,13 +34,6 @@ import accountsRoutes from './routes/accounts.routes.js';
 import vehiclesRoutes from './routes/vehicles.routes.js';
 import syncRoutes from './routes/sync.routes.js';
 import telemetryRoutes from './routes/telemetry.routes.js';
-
-/**
- * =========================
- * START BACKGROUND WORKER
- * =========================
- */
-
 
 /**
  * =========================
@@ -58,7 +53,7 @@ global.io = io;
  */
 let isRunning = false;
 let cronStarted = false;
-global.__MARIASYNC_RUNNING__ = global.__MARIASYNC_RUNNING__ || false;
+global.__MARIASYNC_RUNNING__ = false;
 
 /**
  * =========================
@@ -67,8 +62,7 @@ global.__MARIASYNC_RUNNING__ = global.__MARIASYNC_RUNNING__ || false;
  */
 app.use(
   cors({
-    origin: function (origin, callback) {
-      // allow server-to-server / mobile / health checks
+    origin: (origin, callback) => {
       if (!origin) return callback(null, true);
 
       const allowed = [
@@ -81,16 +75,12 @@ app.use(
       const isAllowed =
         allowed.includes(origin) || origin.endsWith('.vercel.app');
 
-      if (isAllowed) return callback(null, true);
-
-      console.log('❌ Blocked CORS:', origin);
-
-      // IMPORTANT: still allow request, don't break API
-      return callback(null, true);
+      return callback(null, true); // safe open API
     },
     credentials: true,
   })
 );
+
 /**
  * =========================
  * MIDDLEWARE
@@ -159,7 +149,7 @@ app.use((req, res) => {
  * =========================
  */
 app.use((error, _req, res, _next) => {
-  console.error('❌ Unhandled error:', error);
+  console.error('❌ Error:', error);
   res.status(500).json({
     success: false,
     message: 'Internal server error',
@@ -185,18 +175,13 @@ export function startMariaSyncJob() {
   console.log(`📦 Maria sync scheduled: ${schedule}`);
 
   cron.schedule(schedule, async () => {
-    if (isRunning || global.__MARIASYNC_RUNNING__) {
-      console.log('⏳ Sync skipped (already running)');
-      return;
-    }
+    if (isRunning || global.__MARIASYNC_RUNNING__) return;
 
     isRunning = true;
     global.__MARIASYNC_RUNNING__ = true;
 
     try {
-      console.log('🚀 Maria Sync started');
       await runMariaSync();
-      console.log('✅ Maria Sync completed');
     } catch (err) {
       console.error('❌ Maria Sync failed:', err.message);
     } finally {
@@ -208,25 +193,20 @@ export function startMariaSyncJob() {
 
 /**
  * =========================
- * GRACEFUL SHUTDOWN (FIXED)
+ * GRACEFUL SHUTDOWN
  * =========================
  */
-function gracefulShutdown(signal) {
+function shutdown(signal) {
   console.log(`🛑 ${signal} received`);
 
   server.close(() => {
-    console.log('✅ HTTP server closed');
-
-    // allow cleanup time (queues, sockets, etc.)
-    setTimeout(() => {
-      console.log('👋 Process exiting cleanly');
-      process.exit(0);
-    }, 1000);
+    console.log('✅ Server closed');
+    process.exit(0);
   });
 }
 
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 /**
  * =========================
@@ -241,12 +221,10 @@ async function startServer() {
       await testDbConnection();
       console.log('✅ Database connected');
     } catch (err) {
-      console.log('⚠️ DB failed but continuing:', err.message);
+      console.log('⚠️ DB warning:', err.message);
     }
 
-    await initQueue().catch(err =>
-      console.log('⚠️ Queue init failed:', err.message)
-    );
+    await initQueue().catch(() => {});
 
     startMariaSyncJob();
 
@@ -256,7 +234,7 @@ async function startServer() {
     });
 
   } catch (err) {
-    console.error('❌ Fatal startup error:', err);
+    console.error('❌ Fatal error:', err);
     process.exit(1);
   }
 }
