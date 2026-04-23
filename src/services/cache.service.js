@@ -1,21 +1,28 @@
-import { redis } from '../config/redis.js';
+import { redis } from "../config/redis.js";
 
-const TTL = 10; // seconds (real-time data)
+export async function cacheLatestPosition(deviceUid, data) {
+  await redis.hset(`pos:${deviceUid}`, {
+    lat: data.latitude,
+    lon: data.longitude,
+    speed: data.speedKph,
+    heading: data.heading,
+    time: data.deviceTime?.toISOString?.() || new Date().toISOString(),
+  });
 
-export async function setLatestPosition(deviceId, data) {
-  await redis.setex(`latest:${deviceId}`, TTL, JSON.stringify(data));
+  await redis.sadd("active_devices", deviceUid);
 }
 
-export async function getLatestPosition(deviceId) {
-  const data = await redis.get(`latest:${deviceId}`);
-  return data ? JSON.parse(data) : null;
-}
+export async function getAllCachedPositions() {
+  const devices = await redis.smembers("active_devices");
+  if (!devices.length) return [];
 
-export async function setFleetSnapshot(accountId, data) {
-  await redis.setex(`fleet:${accountId}`, 15, JSON.stringify(data));
-}
+  const pipeline = redis.pipeline();
+  devices.forEach(d => pipeline.hgetall(`pos:${d}`));
 
-export async function getFleetSnapshot(accountId) {
-  const data = await redis.get(`fleet:${accountId}`);
-  return data ? JSON.parse(data) : null;
+  const res = await pipeline.exec();
+
+  return res.map(([_, data], i) => ({
+    deviceUid: devices[i],
+    ...data,
+  }));
 }

@@ -1,43 +1,77 @@
-import { pgPool } from '../config/db.js';
-import { publishTelemetryBatch } from '../queue/publisher.js';
+import { redis } from "../config/redis.js";
+import { pgPool } from "../config/db.js";
+import { getIO } from "../socket/server.js";
 
-export async function startTelemetryBufferWorker() {
-  console.log('🚀 Telemetry Buffer Worker started');
+export async function telemetryWorker() {
+  console.log("🚀 Level 3 Worker started");
 
-  setInterval(async () => {
-    const { rows } = await pgPool.query(`
-      SELECT *
-      FROM telemetry_ingestion_buffer
-      WHERE status = 'PENDING'
-      ORDER BY created_at ASC
-      LIMIT 1000
-    `);
+  while (true) {
+    const data = await redis.xRead(
+      { key: "telemetry:stream", id: "0" },
+      { COUNT: 100, BLOCK: 5000 }
+    );
 
-    if (!rows.length) return;
+    if (!data) continue;
 
-    for (const row of rows) {
-      try {
-        const payload = JSON.parse(row.payload);
+    for (const stream of data) {
+      for (const message of stream.messages) {
+        const v = message.message;
 
-        await publishTelemetryBatch(payload);
+        const deviceUid = v.deviceUid;
 
-        await pgPool.query(`
-          UPDATE telemetry_ingestion_buffer
-          SET status='PROCESSED', processed_at=NOW()
-          WHERE id=$1
-        `, [row.id]);
+        const lat = Number(v.lat);
+        const lon = Number(v.lon);
 
-      } catch (err) {
-        await pgPool.query(`
-          UPDATE telemetry_ingestion_buffer
-          SET retry_count = retry_count + 1,
-              status = CASE 
-                WHEN retry_count > 5 THEN 'FAILED'
-                ELSE 'PENDING'
-              END
-          WHERE id=$1
-        `, [row.id]);
+        // 1. WRITE HISTORY (batch later if needed)
+        await pgPool.query(
+          `INSERT INTO telemetry
+           (device_uid, latitude, longitude, speed_kph, device_time)
+           VALUES ($1,$2,$3,$4, NOW())`,
+          [deviceUid, lat, lon, Number(v.speed)]
+        );
+
+        // 2. UPDATE LIVE STATE (CRITICAL OPTIMIZATION)
+        await pgPool.query(
+          `INSERT INTO latest_positions
+           (device_uid, latitude, longitude, speed_kph, updated_at)
+           VALUES ($1,$2,$3,$4,NOW())
+           ON CONFLICT (device_uid) DO UPDATE SET
+             latitude = EXCLUDED.latitude,
+             longitude = EXCLUDED.longitude,
+             speed_kph = EXCLUDED.speed_kph,
+             updated_at = NOW()`,
+          [deviceUid, lat, lon, Number(v.speed)]
+        );
+
+        // 3. CACHE (ELIMINATES DB READS)
+        await redis.hSet(
+          `latest:device:${deviceUid}`,
+          {
+            lat,
+            lon,
+            speed: v.speed,
+            time: v.time
+          }
+        );
+
+        // 4. SOCKET PUSH
+        const io = getIO();
+        io.emit("vehicle:update", {
+          deviceUid,
+          latitude: lat,
+          longitude: lon,
+          speedKph: Number(v.speed)
+        });
+
+        // 5. ALERT
+        if (v.alarm) {
+          io.emit("alert", {
+            deviceUid,
+            message: v.alarm,
+            type: "alarm"
+          });
+        }
       }
     }
-  }, 5000);
+  }
 }
