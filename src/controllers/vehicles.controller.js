@@ -1,12 +1,15 @@
 // src/controllers/vehicles.controller.js
 import { query } from "../config/db.js";
-import { isPrivilegedRole } from "../middleware/auth.js";
 
-function canAccessAccountData(req) {
-  return isPrivilegedRole(req.user.role);
+const PRIVILEGED_ROLES = ["system_admin", "admin", "staff"];
+
+function canAccessAllVehicles(req) {
+  return PRIVILEGED_ROLES.includes(req.user.role);
 }
 
-// ✅ Get all vehicles
+// ======================================================
+// GET ALL VEHICLES
+// ======================================================
 export async function getVehicles(req, res) {
   try {
     let sql = `
@@ -20,24 +23,25 @@ export async function getVehicles(req, res) {
         v.status,
         v.created_at,
         v.updated_at,
-        v.device_uid
+        v.device_uid,
+        v.account_id
       FROM vehicles v
     `;
 
     const params = [];
 
-    // Filter by account if user is not privileged
-    if (!canAccessAccountData(req)) {
-      const accountId = req.user.accountId; // must be UUID string
+    // 🔐 enforce tenant isolation for clients only
+    if (!canAccessAllVehicles(req)) {
+      const accountId = req.user.accountId;
 
       if (!accountId) {
         return res.status(400).json({
           success: false,
-          message: "Invalid accountId on user",
+          message: "Missing account context for user",
         });
       }
 
-      sql += ` WHERE v.account_id = $1::uuid `;
+      sql += ` WHERE v.account_id = $1 `;
       params.push(accountId);
     }
 
@@ -53,37 +57,28 @@ export async function getVehicles(req, res) {
     console.error("getVehicles error:", error);
     return res.status(500).json({
       success: false,
-      message: "Failed to load vehicles. Check server logs for guidance.",
+      message: "Failed to load vehicles",
     });
   }
 }
 
-// ✅ Get single vehicle by ID
+// ======================================================
+// GET VEHICLE BY ID
+// ======================================================
 export async function getVehicleById(req, res) {
   try {
     const { id } = req.params;
 
     let sql = `
-      SELECT
-        v.id,
-        v.plate_number,
-        COALESCE(v.unit_name, '') AS unit_name,
-        COALESCE(v.make, '') AS make,
-        COALESCE(v.model, '') AS model,
-        COALESCE(v.year, 0) AS year,
-        COALESCE(v.account_id::text, '') AS account_id,
-        v.status,
-        v.created_at,
-        v.updated_at,
-        v.device_uid
-      FROM vehicles v
-      WHERE v.id = $1
+      SELECT *
+      FROM vehicles
+      WHERE id = $1
     `;
 
-    const params = [parseInt(id, 10)];
+    const params = [id];
 
-    if (!canAccessAccountData(req)) {
-      sql += ` AND v.account_id = $2::uuid `;
+    if (!canAccessAllVehicles(req)) {
+      sql += ` AND account_id = $2 `;
       params.push(req.user.accountId);
     }
 
@@ -109,7 +104,9 @@ export async function getVehicleById(req, res) {
   }
 }
 
-// ✅ Create new vehicle
+// ======================================================
+// CREATE VEHICLE
+// ======================================================
 export async function createVehicle(req, res) {
   try {
     const {
@@ -120,7 +117,7 @@ export async function createVehicle(req, res) {
       year = null,
       account_id = null,
       status = "active",
-      device_uid = null
+      device_uid = null,
     } = req.body;
 
     if (!plate_number) {
@@ -130,13 +127,36 @@ export async function createVehicle(req, res) {
       });
     }
 
+    // 🔐 enforce ownership rules
+    const finalAccountId = canAccessAllVehicles(req)
+      ? account_id
+      : req.user.accountId;
+
     const result = await query(
       `
-      INSERT INTO vehicles (plate_number, unit_name, make, model, year, account_id, status, device_uid)
-      VALUES ($1, $2, $3, $4, $5, $6::uuid, $7, $8)
+      INSERT INTO vehicles (
+        plate_number,
+        unit_name,
+        make,
+        model,
+        year,
+        account_id,
+        status,
+        device_uid
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
       RETURNING *
       `,
-      [plate_number, unit_name, make, model, year, account_id, status, device_uid]
+      [
+        plate_number,
+        unit_name,
+        make,
+        model,
+        year,
+        finalAccountId,
+        status,
+        device_uid,
+      ]
     );
 
     return res.status(201).json({
@@ -152,47 +172,46 @@ export async function createVehicle(req, res) {
   }
 }
 
-// ✅ Update existing vehicle
+// ======================================================
+// UPDATE VEHICLE (ONLY ALLOWED FIELDS)
+// ======================================================
 export async function updateVehicle(req, res) {
   try {
     const { id } = req.params;
-    const { plate_number, unit_name, make, model, year, account_id, status, device_uid } = req.body;
+    const { make, model, year, account_id } = req.body;
 
-    const existing = await query(`SELECT * FROM vehicles WHERE id = $1`, [parseInt(id, 10)]);
+    const existing = await query(
+      `SELECT * FROM vehicles WHERE id = $1`,
+      [id]
+    );
 
     if (!existing.rows.length) {
-      return res.status(404).json({ success: false, message: "Vehicle not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Vehicle not found",
+      });
     }
 
-    const current = existing.rows[0];
+    const vehicle = existing.rows[0];
+
+    // 🔐 only privileged users can reassign ownership
+    const finalAccountId = canAccessAllVehicles(req)
+      ? account_id ?? vehicle.account_id
+      : vehicle.account_id;
 
     const result = await query(
       `
       UPDATE vehicles
       SET
-        plate_number = $1,
-        unit_name = $2,
-        make = $3,
-        model = $4,
-        year = $5,
-        account_id = $6::uuid,
-        status = $7,
-        device_uid = $8,
+        make = COALESCE($1, make),
+        model = COALESCE($2, model),
+        year = COALESCE($3, year),
+        account_id = $4,
         updated_at = NOW()
-      WHERE id = $9
+      WHERE id = $5
       RETURNING *
       `,
-      [
-        plate_number ?? current.plate_number,
-        unit_name ?? current.unit_name,
-        make ?? current.make,
-        model ?? current.model,
-        year ?? current.year,
-        account_id ?? current.account_id,
-        status ?? current.status,
-        device_uid ?? current.device_uid,
-        id,
-      ]
+      [make, model, year, finalAccountId, id]
     );
 
     return res.json({
@@ -201,24 +220,50 @@ export async function updateVehicle(req, res) {
     });
   } catch (error) {
     console.error("updateVehicle error:", error);
-    return res.status(500).json({ success: false, message: "Failed to update vehicle" });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update vehicle",
+    });
   }
 }
 
-// ✅ Delete vehicle
+// ======================================================
+// DELETE VEHICLE
+// ======================================================
 export async function deleteVehicle(req, res) {
   try {
     const { id } = req.params;
 
-    const result = await query(`DELETE FROM vehicles WHERE id = $1 RETURNING id`, [parseInt(id, 10)]);
+    let sql = `
+      DELETE FROM vehicles
+      WHERE id = $1
+    `;
 
-    if (!result.rows.length) {
-      return res.status(404).json({ success: false, message: "Vehicle not found" });
+    const params = [id];
+
+    if (!canAccessAllVehicles(req)) {
+      sql += ` AND account_id = $2 `;
+      params.push(req.user.accountId);
     }
 
-    return res.json({ success: true, message: "Vehicle deleted" });
+    const result = await query(sql + " RETURNING id", params);
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Vehicle not found",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Vehicle deleted",
+    });
   } catch (error) {
     console.error("deleteVehicle error:", error);
-    return res.status(500).json({ success: false, message: "Failed to delete vehicle" });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete vehicle",
+    });
   }
 }
