@@ -31,6 +31,7 @@ import accountsRoutes from './routes/accounts.routes.js';
 import vehiclesRoutes from './routes/vehicles.routes.js';
 import syncRoutes from './routes/sync.routes.js';
 import telemetryRoutes from './routes/telemetry.routes.js';
+import usersRoutes from './routes/users.routes.js';
 
 /**
  * =========================
@@ -127,6 +128,7 @@ app.use('/api/fleet', fleetRoutes);
 app.use('/api/vehicles', vehiclesRoutes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/telemetry', telemetryRoutes);
+app.use('/api/users', usersRoutes);
 
 /**
  * =========================
