@@ -32,22 +32,24 @@ async function loadLatestFromDb(req) {
       lp.heading,
       lp.device_time AS "deviceTime",
       lp.received_at AS "receivedAt",
+
       COALESCE(v.id, 0) AS "vehicleId",
       COALESCE(v.plate_number, '') AS "plateNumber",
       COALESCE(v.unit_name, '') AS "unitName",
       COALESCE(v.account_id, 0) AS "accountId"
+
     FROM latest_positions lp
     LEFT JOIN devices d ON d.id = lp.device_id
     LEFT JOIN vehicles v ON v.id = d.vehicle_id
   `;
 
   if (!isPrivileged(req)) {
-    sql += ` WHERE v.account_id = $1 `;
+    sql += ` WHERE COALESCE(v.account_id, 0) = $1 `;
     const accId = parseInt(req.user.accountId, 10);
     params.push(isNaN(accId) ? 0 : accId);
   }
 
-  sql += ` ORDER BY lp.received_at DESC LIMIT 1000`;
+  sql += ` ORDER BY lp.received_at DESC LIMIT 500`;
 
   const result = await query(sql, params);
   return result.rows;
