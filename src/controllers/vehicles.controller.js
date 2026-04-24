@@ -36,6 +36,15 @@ export async function getVehicles(req, res) {
     const isPrivileged = canAccessAllVehicles(req);
     const accountId = getAccountId(req);
 
+    // =========================
+    // PAGINATION INPUTS
+    // =========================
+    const limit = Math.min(parseInt(req.query.limit || "200"), 500);
+    const offset = Math.max(parseInt(req.query.offset || "0"), 0);
+
+    // =========================
+    // BASE QUERY
+    // =========================
     let sql = `
       SELECT
         v.id,
@@ -53,6 +62,9 @@ export async function getVehicles(req, res) {
 
     const params = [];
 
+    // =========================
+    // ACCOUNT FILTERING
+    // =========================
     if (!isPrivileged) {
       if (!accountId) {
         return res.status(401).json({
@@ -65,13 +77,35 @@ export async function getVehicles(req, res) {
       params.push(accountId);
     }
 
-    sql += ` ORDER BY v.id DESC`;
+    // =========================
+    // COUNT QUERY (for frontend pagination)
+    // =========================
+    let countSql = `SELECT COUNT(*) FROM vehicles v`;
+    const countParams = [];
 
-    const result = await query(sql, params);
+    if (!isPrivileged) {
+      countSql += ` WHERE v.account_id = $1 `;
+      countParams.push(accountId);
+    }
+
+    // =========================
+    // FINAL SORT + PAGINATION
+    // =========================
+    sql += ` ORDER BY v.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+
+    params.push(limit, offset);
+
+    const [result, countResult] = await Promise.all([
+      query(sql, params),
+      query(countSql, countParams),
+    ]);
 
     return res.json({
       success: true,
       data: result.rows,
+      total: parseInt(countResult.rows[0].count),
+      limit,
+      offset,
     });
   } catch (error) {
     console.error("getVehicles error:", error);
