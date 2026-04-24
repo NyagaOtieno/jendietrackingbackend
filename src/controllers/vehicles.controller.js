@@ -53,7 +53,7 @@ export async function getVehicles(req, res) {
 
     const params = [];
 
-    // 🔐 CLIENTS ONLY SEE THEIR ACCOUNT
+    // clients scoped to account only
     if (!isPrivileged) {
       if (!accountId) {
         return res.status(401).json({
@@ -81,10 +81,6 @@ export async function getVehicles(req, res) {
     return res.status(500).json({
       success: false,
       message: "Failed to load vehicles",
-      error:
-        process.env.NODE_ENV === "development"
-          ? error.message
-          : undefined,
     });
   }
 }
@@ -193,7 +189,6 @@ export async function createVehicle(req, res) {
         });
       }
 
-      // ✅ Validate account exists
       const accCheck = await query(
         `SELECT id FROM accounts WHERE id = $1 LIMIT 1`,
         [account_id]
@@ -301,7 +296,6 @@ export async function updateVehicle(req, res) {
     let finalAccountId = vehicle.account_id;
 
     if (isPrivileged && account_id) {
-      // ✅ Validate account exists
       const accCheck = await query(
         `SELECT id FROM accounts WHERE id = $1 LIMIT 1`,
         [account_id]
@@ -330,6 +324,14 @@ export async function updateVehicle(req, res) {
       `,
       [make, model, year, finalAccountId, id]
     );
+
+    // ✅ SAFE LOG (FIXED)
+    console.log("Vehicle updated:", {
+      vehicleId: id,
+      updatedBy: req.user?.id,
+      role: req.user?.role,
+      newAccountId: finalAccountId,
+    });
 
     return res.json({
       success: true,
@@ -405,9 +407,3 @@ export async function deleteVehicle(req, res) {
     });
   }
 }
-console.log("Vehicle updated", {
-  vehicleId: id,
-  updatedBy: req.user.id,
-  role: req.user.role,
-  newAccountId: finalAccountId,
-});

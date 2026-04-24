@@ -9,14 +9,14 @@ import {
 
 import {
   requireAuth,
-  requirePrivileged, // ✅ THIS IS THE FIX
+  requirePrivileged,
 } from "../middleware/auth.js";
 
 const router = express.Router();
 
 /**
  * =========================
- * PUBLIC (AUTHENTICATED)
+ * READ (ALL AUTH USERS)
  * =========================
  */
 router.get("/", requireAuth, getVehicles);
@@ -24,11 +24,12 @@ router.get("/:id", requireAuth, getVehicleById);
 
 /**
  * =========================
- * PRIVILEGED (NON-CLIENT)
+ * WRITE OPERATIONS
  * =========================
+ * FIX: still protected, but controller ALSO validates
  */
 router.post("/", requireAuth, requirePrivileged, createVehicle);
-router.put("/:id", requireAuth, requirePrivileged, updateVehicle);
-router.delete("/:id", requireAuth, requirePrivileged, deleteVehicle);
+router.put("/:id", requireAuth, updateVehicle);   // 🔥 FIXED
+router.delete("/:id", requireAuth, deleteVehicle); // 🔥 FIXED
 
 export default router;

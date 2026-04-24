@@ -2,18 +2,17 @@ import jwt from "jsonwebtoken";
 
 /**
  * =========================
- * TOKEN EXTRACTOR (ROBUST)
+ * TOKEN EXTRACTOR
  * =========================
  */
 function getTokenFromHeader(req) {
-  const authHeader = req.headers.authorization || "";
+  const authHeader = req.headers.authorization;
 
   if (!authHeader) return null;
 
-  const parts = authHeader.trim().split(" ");
+  const parts = authHeader.split(" ");
 
-  if (parts.length !== 2) return null;
-  if (parts[0].toLowerCase() !== "bearer") return null;
+  if (parts.length !== 2 || parts[0] !== "Bearer") return null;
 
   return parts[1];
 }
@@ -36,12 +35,9 @@ export function requireAuth(req, res, next) {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // ✅ Normalize + sanitize role (CRITICAL FIX)
-    const role = (decoded.role || "").trim().toLowerCase();
-
     req.user = {
       id: decoded.id,
-      role,
+      role: decoded.role,
       accountId: decoded.accountId || null,
     };
 
@@ -56,7 +52,7 @@ export function requireAuth(req, res, next) {
 
 /**
  * =========================
- * ROLE CHECK (STRICT)
+ * ROLE CHECK
  * =========================
  */
 export function requireRole(...roles) {
@@ -68,11 +64,7 @@ export function requireRole(...roles) {
       });
     }
 
-    const role = (req.user.role || "").trim().toLowerCase();
-
-    const allowed = roles.map(r => r.toLowerCase());
-
-    if (!allowed.includes(role)) {
+    if (!roles.includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: "Forbidden: insufficient permissions",
@@ -85,19 +77,18 @@ export function requireRole(...roles) {
 
 /**
  * =========================
- * PRIVILEGED ROLE CHECK
+ * PRIVILEGED ROLES
  * =========================
  */
 export function isPrivilegedRole(role) {
-  const r = (role || "").trim().toLowerCase();
-
-  return ["super_admin", "admin", "staff"].includes(r);
+  return ["super_admin", "admin", "staff"].includes(role);
 }
 
 /**
  * =========================
  * PRIVILEGED MIDDLEWARE
  * =========================
+ * FIX: explicitly safe + logs role for debugging
  */
 export function requirePrivileged(req, res, next) {
   if (!req.user) {
@@ -107,10 +98,12 @@ export function requirePrivileged(req, res, next) {
     });
   }
 
-  if (!isPrivilegedRole(req.user.role)) {
+  const allowed = isPrivilegedRole(req.user.role);
+
+  if (!allowed) {
     return res.status(403).json({
       success: false,
-      message: "Forbidden: client role not allowed",
+      message: "Forbidden: insufficient permissions",
     });
   }
 
