@@ -4,13 +4,12 @@ import { isPrivilegedRole } from "../middleware/auth.js";
 // ======================================================
 // HELPERS
 // ======================================================
-function canAccessAllVehicles(req) {
-  const role = req?.user?.role;
-  return isPrivilegedRole(role);
+function isPrivileged(req) {
+  return isPrivilegedRole(req?.user?.role);
 }
 
 function getAccountId(req) {
-  return req?.user?.accountId || null;
+  return req?.user?.accountId ?? null;
 }
 
 // ======================================================
@@ -18,7 +17,7 @@ function getAccountId(req) {
 // ======================================================
 export async function getVehicles(req, res) {
   try {
-    const isPrivileged = canAccessAllVehicles(req);
+    const privileged = isPrivileged(req);
     const accountId = getAccountId(req);
 
     let sql = `
@@ -39,12 +38,12 @@ export async function getVehicles(req, res) {
 
     const params = [];
 
-    // 🔐 Tenant isolation only for NON privileged users
-    if (!isPrivileged) {
+    // 🔐 ONLY clients are restricted
+    if (!privileged) {
       if (!accountId) {
-        return res.status(401).json({
+        return res.status(400).json({
           success: false,
-          message: "Missing account context for user",
+          message: "Client user missing accountId in token",
         });
       }
 
@@ -63,11 +62,9 @@ export async function getVehicles(req, res) {
 
   } catch (error) {
     console.error("getVehicles error:", error);
-
     return res.status(500).json({
       success: false,
       message: "Failed to load vehicles",
-      error: process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   }
 }
@@ -79,7 +76,7 @@ export async function getVehicleById(req, res) {
   try {
     const { id } = req.params;
 
-    const isPrivileged = canAccessAllVehicles(req);
+    const privileged = isPrivileged(req);
     const accountId = getAccountId(req);
 
     let sql = `
@@ -90,7 +87,7 @@ export async function getVehicleById(req, res) {
 
     const params = [id];
 
-    if (!isPrivileged) {
+    if (!privileged) {
       sql += ` AND account_id = $2 `;
       params.push(accountId);
     }
@@ -111,7 +108,6 @@ export async function getVehicleById(req, res) {
 
   } catch (error) {
     console.error("getVehicleById error:", error);
-
     return res.status(500).json({
       success: false,
       message: "Failed to load vehicle",
@@ -142,17 +138,16 @@ export async function createVehicle(req, res) {
       });
     }
 
-    const isPrivileged = canAccessAllVehicles(req);
+    const privileged = isPrivileged(req);
     const accountId = getAccountId(req);
 
-    const finalAccountId = isPrivileged
-      ? account_id || accountId
-      : accountId;
+    // 🔐 enforce tenant ownership
+    const finalAccountId = privileged ? (account_id ?? null) : accountId;
 
     if (!finalAccountId) {
       return res.status(400).json({
         success: false,
-        message: "Account context missing for vehicle creation",
+        message: "Missing account_id for vehicle assignment",
       });
     }
 
@@ -190,7 +185,6 @@ export async function createVehicle(req, res) {
 
   } catch (error) {
     console.error("createVehicle error:", error);
-
     return res.status(500).json({
       success: false,
       message: "Failed to create vehicle",
@@ -199,15 +193,12 @@ export async function createVehicle(req, res) {
 }
 
 // ======================================================
-// UPDATE VEHICLE
+// UPDATE VEHICLE (ONLY SAFE FIELDS)
 // ======================================================
 export async function updateVehicle(req, res) {
   try {
     const { id } = req.params;
-    const { make, model, year, account_id } = req.body;
-
-    const isPrivileged = canAccessAllVehicles(req);
-    const accountId = getAccountId(req);
+    const { make, model, year } = req.body;
 
     const existing = await query(
       `SELECT * FROM vehicles WHERE id = $1`,
@@ -221,12 +212,6 @@ export async function updateVehicle(req, res) {
       });
     }
 
-    const vehicle = existing.rows[0];
-
-    const finalAccountId = isPrivileged
-      ? account_id || vehicle.account_id
-      : vehicle.account_id;
-
     const result = await query(
       `
       UPDATE vehicles
@@ -234,12 +219,11 @@ export async function updateVehicle(req, res) {
         make = COALESCE($1, make),
         model = COALESCE($2, model),
         year = COALESCE($3, year),
-        account_id = $4,
         updated_at = NOW()
-      WHERE id = $5
+      WHERE id = $4
       RETURNING *
       `,
-      [make, model, year, finalAccountId, id]
+      [make, model, year, id]
     );
 
     return res.json({
@@ -249,7 +233,6 @@ export async function updateVehicle(req, res) {
 
   } catch (error) {
     console.error("updateVehicle error:", error);
-
     return res.status(500).json({
       success: false,
       message: "Failed to update vehicle",
@@ -262,18 +245,14 @@ export async function updateVehicle(req, res) {
 // ======================================================
 export async function deleteVehicle(req, res) {
   try {
-    const isPrivileged = canAccessAllVehicles(req);
+    const privileged = isPrivileged(req);
     const accountId = getAccountId(req);
 
-    let sql = `
-      DELETE FROM vehicles
-      WHERE id = $1
-    `;
-
+    let sql = `DELETE FROM vehicles WHERE id = $1`;
     const params = [req.params.id];
 
-    if (!isPrivileged) {
-      sql += ` AND account_id = $2 `;
+    if (!privileged) {
+      sql += ` AND account_id = $2`;
       params.push(accountId);
     }
 
@@ -293,7 +272,6 @@ export async function deleteVehicle(req, res) {
 
   } catch (error) {
     console.error("deleteVehicle error:", error);
-
     return res.status(500).json({
       success: false,
       message: "Failed to delete vehicle",
