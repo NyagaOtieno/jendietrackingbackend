@@ -2,17 +2,18 @@ import jwt from "jsonwebtoken";
 
 /**
  * =========================
- * TOKEN EXTRACTOR
+ * TOKEN EXTRACTOR (ROBUST)
  * =========================
  */
 function getTokenFromHeader(req) {
-  const authHeader = req.headers.authorization;
+  const authHeader = req.headers.authorization || "";
 
   if (!authHeader) return null;
 
-  const parts = authHeader.split(" ");
+  const parts = authHeader.trim().split(" ");
 
-  if (parts.length !== 2 || parts[0] !== "Bearer") return null;
+  if (parts.length !== 2) return null;
+  if (parts[0].toLowerCase() !== "bearer") return null;
 
   return parts[1];
 }
@@ -35,10 +36,12 @@ export function requireAuth(req, res, next) {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // ✅ Normalize user payload (IMPORTANT)
+    // ✅ Normalize + sanitize role (CRITICAL FIX)
+    const role = (decoded.role || "").trim().toLowerCase();
+
     req.user = {
       id: decoded.id,
-      role: decoded.role,
+      role,
       accountId: decoded.accountId || null,
     };
 
@@ -55,7 +58,6 @@ export function requireAuth(req, res, next) {
  * =========================
  * ROLE CHECK (STRICT)
  * =========================
- * Use when you want SPECIFIC roles only
  */
 export function requireRole(...roles) {
   return (req, res, next) => {
@@ -66,7 +68,11 @@ export function requireRole(...roles) {
       });
     }
 
-    if (!roles.includes(req.user.role)) {
+    const role = (req.user.role || "").trim().toLowerCase();
+
+    const allowed = roles.map(r => r.toLowerCase());
+
+    if (!allowed.includes(role)) {
       return res.status(403).json({
         success: false,
         message: "Forbidden: insufficient permissions",
@@ -81,17 +87,17 @@ export function requireRole(...roles) {
  * =========================
  * PRIVILEGED ROLE CHECK
  * =========================
- * Central definition of "internal users"
  */
 export function isPrivilegedRole(role) {
-  return ["super_admin", "admin", "staff"].includes(role);
+  const r = (role || "").trim().toLowerCase();
+
+  return ["super_admin", "admin", "staff"].includes(r);
 }
 
 /**
  * =========================
  * PRIVILEGED MIDDLEWARE
  * =========================
- * Use for business operations (vehicles, accounts, users)
  */
 export function requirePrivileged(req, res, next) {
   if (!req.user) {
@@ -104,7 +110,7 @@ export function requirePrivileged(req, res, next) {
   if (!isPrivilegedRole(req.user.role)) {
     return res.status(403).json({
       success: false,
-      message: "Forbidden: insufficient permissions",
+      message: "Forbidden: client role not allowed",
     });
   }
 
