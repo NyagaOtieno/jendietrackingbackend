@@ -1,5 +1,10 @@
 import bcrypt from "bcryptjs";
 import { query } from "../config/db.js";
+import { ROLES } from "../utils/roles.js";
+
+// ======================================================
+// HELPERS
+// ======================================================
 
 function getDefaultRoleForAccountType(accountType) {
   if (accountType === "sacco") return "sacco_user";
@@ -7,9 +12,19 @@ function getDefaultRoleForAccountType(accountType) {
   return "individual_user";
 }
 
-export async function getAccounts(_req, res) {
+// ONLY clients are account-bound
+function isClientRole(role) {
+  return role === ROLES.CLIENT;
+}
+
+// ======================================================
+// GET ACCOUNTS (SCOPED SAFELY)
+// ======================================================
+export async function getAccounts(req, res) {
   try {
-    const result = await query(`
+    const { role, accountId } = req.user;
+
+    let sql = `
       SELECT
         id,
         account_type,
@@ -20,13 +35,32 @@ export async function getAccounts(_req, res) {
         status,
         created_at
       FROM accounts
-      ORDER BY created_at DESC
-    `);
+    `;
+
+    const params = [];
+
+    // Clients only see their own account
+    if (role === ROLES.CLIENT) {
+      if (!accountId) {
+        return res.status(403).json({
+          success: false,
+          message: "Client account context missing",
+        });
+      }
+
+      sql += ` WHERE id = $1 `;
+      params.push(accountId);
+    }
+
+    sql += ` ORDER BY created_at DESC`;
+
+    const result = await query(sql, params);
 
     return res.json({
       success: true,
       data: result.rows,
     });
+
   } catch (error) {
     console.error("getAccounts error:", error);
     return res.status(500).json({
@@ -36,9 +70,21 @@ export async function getAccounts(_req, res) {
   }
 }
 
+// ======================================================
+// GET ACCOUNT BY ID
+// ======================================================
 export async function getAccountById(req, res) {
   try {
     const { id } = req.params;
+    const { role, accountId } = req.user;
+
+    // CLIENT SAFETY CHECK
+    if (role === ROLES.CLIENT && accountId !== id) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: cannot access this account",
+      });
+    }
 
     const result = await query(
       `
@@ -68,6 +114,7 @@ export async function getAccountById(req, res) {
       success: true,
       data: result.rows[0],
     });
+
   } catch (error) {
     console.error("getAccountById error:", error);
     return res.status(500).json({
@@ -77,8 +124,13 @@ export async function getAccountById(req, res) {
   }
 }
 
+// ======================================================
+// CREATE ACCOUNT (FIXED ROLE CONTROL)
+// ======================================================
 export async function createAccount(req, res) {
   try {
+    const { role } = req.user;
+
     const {
       account_type = "individual",
       account_name,
@@ -95,6 +147,14 @@ export async function createAccount(req, res) {
       });
     }
 
+    // Only non-clients can create accounts
+    if (role === ROLES.CLIENT) {
+      return res.status(403).json({
+        success: false,
+        message: "Clients cannot create accounts",
+      });
+    }
+
     const result = await query(
       `
       INSERT INTO accounts (
@@ -105,7 +165,7 @@ export async function createAccount(req, res) {
         sacco_code,
         status
       )
-      VALUES ($1, $2, $3, $4, $5, $6)
+      VALUES ($1,$2,$3,$4,$5,$6)
       RETURNING *
       `,
       [account_type, account_name, client_code, company_code, sacco_code, status]
@@ -115,6 +175,7 @@ export async function createAccount(req, res) {
       success: true,
       data: result.rows[0],
     });
+
   } catch (error) {
     console.error("createAccount error:", error);
     return res.status(500).json({
@@ -124,9 +185,21 @@ export async function createAccount(req, res) {
   }
 }
 
+// ======================================================
+// UPDATE ACCOUNT
+// ======================================================
 export async function updateAccount(req, res) {
   try {
     const { id } = req.params;
+    const { role, accountId } = req.user;
+
+    // CLIENT SAFETY
+    if (role === ROLES.CLIENT && accountId !== id) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden",
+      });
+    }
 
     const existing = await query(`SELECT * FROM accounts WHERE id = $1`, [id]);
 
@@ -175,6 +248,7 @@ export async function updateAccount(req, res) {
       success: true,
       data: result.rows[0],
     });
+
   } catch (error) {
     console.error("updateAccount error:", error);
     return res.status(500).json({
@@ -184,9 +258,20 @@ export async function updateAccount(req, res) {
   }
 }
 
+// ======================================================
+// DELETE ACCOUNT
+// ======================================================
 export async function deleteAccount(req, res) {
   try {
     const { id } = req.params;
+    const { role } = req.user;
+
+    if (role === ROLES.CLIENT) {
+      return res.status(403).json({
+        success: false,
+        message: "Clients cannot delete accounts",
+      });
+    }
 
     const result = await query(
       `DELETE FROM accounts WHERE id = $1 RETURNING id`,
@@ -204,6 +289,7 @@ export async function deleteAccount(req, res) {
       success: true,
       message: "Account deleted",
     });
+
   } catch (error) {
     console.error("deleteAccount error:", error);
     return res.status(500).json({
@@ -213,6 +299,9 @@ export async function deleteAccount(req, res) {
   }
 }
 
+// ======================================================
+// ADD USER TO ACCOUNT (UNCHANGED LOGIC, SAFER ROLE HANDLING)
+// ======================================================
 export async function addUserToAccount(req, res) {
   try {
     const { id } = req.params;
@@ -245,8 +334,6 @@ export async function addUserToAccount(req, res) {
       });
     }
 
-    const account = accountResult.rows[0];
-
     const existingUser = await query(
       `
       SELECT id
@@ -265,7 +352,7 @@ export async function addUserToAccount(req, res) {
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const finalRole = role || getDefaultRoleForAccountType(account.account_type);
+    const finalRole = role || getDefaultRoleForAccountType(accountResult.rows[0].account_type);
 
     const result = await query(
       `
@@ -279,7 +366,7 @@ export async function addUserToAccount(req, res) {
         account_id,
         status
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
       RETURNING id, full_name, username, email, phone, role, account_id, status, created_at
       `,
       [
@@ -299,6 +386,7 @@ export async function addUserToAccount(req, res) {
       message: "User added to account successfully",
       data: result.rows[0],
     });
+
   } catch (error) {
     console.error("addUserToAccount error:", error);
     return res.status(500).json({
@@ -308,6 +396,9 @@ export async function addUserToAccount(req, res) {
   }
 }
 
+// ======================================================
+// GET ACCOUNT USERS (CLIENT SAFE NOT REQUIRED)
+// ======================================================
 export async function getAccountUsers(req, res) {
   try {
     const { id } = req.params;
@@ -335,6 +426,7 @@ export async function getAccountUsers(req, res) {
       success: true,
       data: result.rows,
     });
+
   } catch (error) {
     console.error("getAccountUsers error:", error);
     return res.status(500).json({
