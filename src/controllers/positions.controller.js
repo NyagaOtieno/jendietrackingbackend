@@ -79,24 +79,15 @@ async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
 }
 
 export async function getLatestPositions(req, res) {
-  try {
-    const rows = await loadLatestFromDb(req);
+  const rows = await loadLatestFromDb(req);
 
-    const enriched = await Promise.all(
-      rows.map(async (pos) => ({
-        ...pos,
-        locationName: await safeLocationName(pos.lat, pos.lon),
-      }))
-    );
+  console.log("🔥 FINAL ROWS:", rows.length);
 
-    return res.json({ success: true, data: enriched });
-  } catch (error) {
-    console.error("getLatestPositions error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to load latest positions — check logs",
-    });
-  }
+  return res.json({
+    success: true,
+    debugCount: rows.length,
+    data: rows
+  });
 }
 
 export async function getHistory(req, res) {
