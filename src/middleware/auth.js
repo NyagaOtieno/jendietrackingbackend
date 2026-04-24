@@ -3,13 +3,14 @@ import jwt from "jsonwebtoken";
 function getTokenFromHeader(req) {
   const authHeader = req.headers.authorization || "";
 
-  if (!authHeader.startsWith("Bearer ")) {
-    return null;
-  }
+  if (!authHeader.startsWith("Bearer ")) return null;
 
   return authHeader.slice(7).trim();
 }
 
+// ======================================================
+// AUTH MIDDLEWARE
+// ======================================================
 export function requireAuth(req, res, next) {
   try {
     const token = getTokenFromHeader(req);
@@ -23,9 +24,15 @@ export function requireAuth(req, res, next) {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    req.user = decoded;
+    // 🔥 normalize user payload (IMPORTANT FIX)
+    req.user = {
+      id: decoded.id,
+      role: decoded.role,
+      accountId: decoded.accountId || null,
+    };
+
     return next();
-  } catch (_error) {
+  } catch (error) {
     return res.status(401).json({
       success: false,
       message: "Invalid or expired token",
@@ -33,6 +40,9 @@ export function requireAuth(req, res, next) {
   }
 }
 
+// ======================================================
+// ROLE CHECK
+// ======================================================
 export function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user) {
@@ -53,6 +63,9 @@ export function requireRole(...roles) {
   };
 }
 
+// ======================================================
+// PRIVILEGED ROLES (FIXED CONSISTENCY)
+// ======================================================
 export function isPrivilegedRole(role) {
-  return ["admin", "office_admin", "staff"].includes(role);
+  return ["super_admin", "admin", "staff"].includes(role);
 }

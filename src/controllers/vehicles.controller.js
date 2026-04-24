@@ -1,10 +1,11 @@
-// src/controllers/vehicles.controller.js
 import { query } from "../config/db.js";
+import { isPrivilegedRole } from "../middleware/auth.js";
 
-const PRIVILEGED_ROLES = ["system_admin", "admin", "staff"];
-
+// ======================================================
+// HELPERS
+// ======================================================
 function canAccessAllVehicles(req) {
-  return PRIVILEGED_ROLES.includes(req.user.role);
+  return isPrivilegedRole(req.user.role);
 }
 
 // ======================================================
@@ -30,19 +31,17 @@ export async function getVehicles(req, res) {
 
     const params = [];
 
-    // 🔐 enforce tenant isolation for clients only
+    // 🔐 CLIENT ONLY FILTERING
     if (!canAccessAllVehicles(req)) {
-      const accountId = req.user.accountId;
-
-      if (!accountId) {
+      if (!req.user.accountId) {
         return res.status(400).json({
           success: false,
-          message: "Missing account context for user",
+          message: "Missing account context for client user",
         });
       }
 
       sql += ` WHERE v.account_id = $1 `;
-      params.push(accountId);
+      params.push(req.user.accountId);
     }
 
     sql += ` ORDER BY v.created_at DESC`;
@@ -111,13 +110,13 @@ export async function createVehicle(req, res) {
   try {
     const {
       plate_number,
-      unit_name = null,
-      make = null,
-      model = null,
-      year = null,
-      account_id = null,
+      unit_name,
+      make,
+      model,
+      year,
+      account_id,
       status = "active",
-      device_uid = null,
+      device_uid,
     } = req.body;
 
     if (!plate_number) {
@@ -127,7 +126,7 @@ export async function createVehicle(req, res) {
       });
     }
 
-    // 🔐 enforce ownership rules
+    // 🔐 enforce ownership
     const finalAccountId = canAccessAllVehicles(req)
       ? account_id
       : req.user.accountId;
@@ -194,7 +193,6 @@ export async function updateVehicle(req, res) {
 
     const vehicle = existing.rows[0];
 
-    // 🔐 only privileged users can reassign ownership
     const finalAccountId = canAccessAllVehicles(req)
       ? account_id ?? vehicle.account_id
       : vehicle.account_id;
@@ -228,18 +226,16 @@ export async function updateVehicle(req, res) {
 }
 
 // ======================================================
-// DELETE VEHICLE
+// DELETE VEHICLE (FIXED ORDER ISSUE)
 // ======================================================
 export async function deleteVehicle(req, res) {
   try {
-    const { id } = req.params;
-
     let sql = `
       DELETE FROM vehicles
       WHERE id = $1
     `;
 
-    const params = [id];
+    const params = [req.params.id];
 
     if (!canAccessAllVehicles(req)) {
       sql += ` AND account_id = $2 `;
