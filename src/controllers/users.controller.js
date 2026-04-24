@@ -1,9 +1,24 @@
 import { query } from "../config/db.js";
-import { isPrivilegedRole } from "../middleware/auth.js";
 import bcrypt from "bcryptjs";
+import { isPrivilegedRole } from "../middleware/auth.js";
 
 // ======================================================
-// CREATE USER (ROLE-AWARE RULE ENGINE)
+// HELPERS
+// ======================================================
+function getAccountId(req) {
+  return req?.user?.accountId || null;
+}
+
+function canCreate(role) {
+  return ["super_admin", "admin", "staff"].includes(role);
+}
+
+function canViewAll(role) {
+  return ["super_admin", "admin"].includes(role);
+}
+
+// ======================================================
+// CREATE USER
 // ======================================================
 export async function createUser(req, res) {
   try {
@@ -18,42 +33,33 @@ export async function createUser(req, res) {
       });
     }
 
-    // ===============================
-    // ROLE CREATION RULES
-    // ===============================
-    const isSystemAdmin = creatorRole === "super_admin";
-    const isAdmin = creatorRole === "admin";
-    const isStaff = creatorRole === "staff";
-
-    if (role === "admin" && !isSystemAdmin) {
+    // ROLE RULES
+    if (!canCreate(creatorRole)) {
       return res.status(403).json({
         success: false,
-        message: "Only system admin can create admin",
+        message: "Not allowed to create users",
       });
     }
 
-    if (role === "staff" && !(isSystemAdmin || isAdmin)) {
+    if (role === "admin" && creatorRole !== "super_admin") {
       return res.status(403).json({
         success: false,
-        message: "Only admin or system admin can create staff",
+        message: "Only super admin can create admin",
       });
     }
 
-    if (role === "client" && !(isSystemAdmin || isAdmin || isStaff)) {
+    if (role === "staff" && !["super_admin", "admin"].includes(creatorRole)) {
       return res.status(403).json({
         success: false,
-        message: "Not allowed to create client",
+        message: "Not allowed to create staff",
       });
     }
 
-    // ===============================
-    // ACCOUNT RULE
-    // ===============================
+    // CLIENT MUST HAVE ACCOUNT
     let finalAccountId = null;
 
     if (role === "client") {
-      // client MUST belong to account
-      finalAccountId = account_id;
+      finalAccountId = account_id || getAccountId(req);
 
       if (!finalAccountId) {
         return res.status(400).json({
@@ -63,9 +69,6 @@ export async function createUser(req, res) {
       }
     }
 
-    // ===============================
-    // HASH PASSWORD
-    // ===============================
     const password_hash = await bcrypt.hash(password, 10);
 
     const result = await query(
@@ -89,6 +92,7 @@ export async function createUser(req, res) {
       data: result.rows[0],
       account_id: finalAccountId,
     });
+
   } catch (error) {
     console.error("createUser error:", error);
     return res.status(500).json({
@@ -99,11 +103,12 @@ export async function createUser(req, res) {
 }
 
 // ======================================================
-// GET USERS (ROLE FILTERED)
+// READ USERS
 // ======================================================
 export async function getUsers(req, res) {
   try {
     const role = req.user.role;
+    const accountId = req.user.accountId;
 
     let sql = `
       SELECT id, full_name, email, phone, role, status, created_at
@@ -112,7 +117,7 @@ export async function getUsers(req, res) {
 
     let params = [];
 
-    // clients only see themselves OR their account users later
+    // CLIENTS ONLY SEE THEMSELVES
     if (role === "client") {
       sql += ` WHERE id = $1 `;
       params.push(req.user.id);
@@ -124,11 +129,98 @@ export async function getUsers(req, res) {
       success: true,
       data: result.rows,
     });
+
   } catch (error) {
     console.error("getUsers error:", error);
     return res.status(500).json({
       success: false,
       message: "Failed to fetch users",
+    });
+  }
+}
+
+// ======================================================
+// UPDATE USER
+// ======================================================
+export async function updateUser(req, res) {
+  try {
+    const { id } = req.params;
+    const { full_name, email, phone, role, status } = req.body;
+
+    const existing = await query(
+      `SELECT * FROM users WHERE id = $1`,
+      [id]
+    );
+
+    if (!existing.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    const result = await query(
+      `
+      UPDATE users
+      SET
+        full_name = COALESCE($1, full_name),
+        email = COALESCE($2, email),
+        phone = COALESCE($3, phone),
+        role = COALESCE($4, role),
+        status = COALESCE($5, status)
+      WHERE id = $6
+      RETURNING id, full_name, email, role, status
+      `,
+      [full_name, email, phone, role, status, id]
+    );
+
+    return res.json({
+      success: true,
+      data: result.rows[0],
+    });
+
+  } catch (error) {
+    console.error("updateUser error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update user",
+    });
+  }
+}
+
+// ======================================================
+// DELETE USER
+// ======================================================
+export async function deleteUser(req, res) {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      `
+      DELETE FROM users
+      WHERE id = $1
+      RETURNING id
+      `,
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "User deleted",
+    });
+
+  } catch (error) {
+    console.error("deleteUser error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete user",
     });
   }
 }
