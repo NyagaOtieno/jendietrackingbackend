@@ -21,45 +21,15 @@ function isPrivileged(req) {
  * This was the reason your API returned: { data: [] }
  */
 async function loadLatestFromDb(req) {
-  const params = [];
+  const result = await query(`
+    SELECT *
+    FROM latest_positions
+    ORDER BY received_at DESC
+    LIMIT 50
+  `);
 
-  let sql = `
-    SELECT
-      lp.device_id AS "deviceId",
-      d.device_uid AS "deviceUid",
-      lp.latitude AS lat,
-      lp.longitude AS lon,
-      COALESCE(lp.speed_kph, 0) AS "speedKph",
-      lp.heading,
-      lp.device_time AS "deviceTime",
-      lp.received_at AS "receivedAt",
-
-      COALESCE(v.id, 0) AS "vehicleId",
-      COALESCE(v.plate_number, '') AS "plateNumber",
-      COALESCE(v.unit_name, '') AS "unitName",
-      COALESCE(v.account_id, 0) AS "accountId"
-
-    FROM latest_positions lp
-    LEFT JOIN devices d ON d.id = lp.device_id
-    LEFT JOIN vehicles v ON v.id = d.vehicle_id
-  `;
-
-  const isPriv = isPrivilegedRole(req?.user?.role || "guest");
-
-  if (!isPriv) {
-    const accId = parseInt(req?.user?.accountId || 0, 10);
-
-    // 🔥 CRITICAL FIX: move filter into JOIN-safe condition
-    sql += ` WHERE (v.account_id = $1 OR v.account_id IS NULL) `;
-    params.push(isNaN(accId) ? 0 : accId);
-  }
-
-  sql += ` ORDER BY lp.received_at DESC LIMIT 1000`;
-
-  const result = await query(sql, params);
   return result.rows;
 }
-
 async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
   const clauses = [`d.device_uid = $1`];
   const params = [deviceUid];
