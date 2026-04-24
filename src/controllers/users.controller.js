@@ -79,18 +79,25 @@ export async function createUser(req, res) {
         phone,
         password_hash,
         role,
+        account_id,
         status
       )
-      VALUES ($1,$2,$3,$4,$5,'active')
-      RETURNING id, full_name, email, role, status
+      VALUES ($1,$2,$3,$4,$5,$6,'active')
+      RETURNING id, full_name, email, role, status, account_id
       `,
-      [full_name, email, phone, password_hash, role]
+      [
+        full_name,
+        email,
+        phone,
+        password_hash,
+        role,
+        finalAccountId, // ✅ FIXED HERE
+      ]
     );
 
     return res.status(201).json({
       success: true,
       data: result.rows[0],
-      account_id: finalAccountId,
     });
 
   } catch (error) {
@@ -119,9 +126,9 @@ export async function getUsers(req, res) {
 
     // CLIENTS ONLY SEE THEMSELVES
     if (role === "client") {
-      sql += ` WHERE id = $1 `;
-      params.push(req.user.id);
-    }
+  sql += ` WHERE account_id = $1 `;
+  params.push(req.user.accountId);
+}
 
     const result = await query(sql, params);
 
