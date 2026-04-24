@@ -35,6 +35,7 @@ export function requireAuth(req, res, next) {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+    // ✅ Normalize user payload (IMPORTANT)
     req.user = {
       id: decoded.id,
       role: decoded.role,
@@ -52,8 +53,9 @@ export function requireAuth(req, res, next) {
 
 /**
  * =========================
- * ROLE CHECK
+ * ROLE CHECK (STRICT)
  * =========================
+ * Use when you want SPECIFIC roles only
  */
 export function requireRole(...roles) {
   return (req, res, next) => {
@@ -77,8 +79,9 @@ export function requireRole(...roles) {
 
 /**
  * =========================
- * PRIVILEGED ROLES
+ * PRIVILEGED ROLE CHECK
  * =========================
+ * Central definition of "internal users"
  */
 export function isPrivilegedRole(role) {
   return ["super_admin", "admin", "staff"].includes(role);
@@ -88,7 +91,7 @@ export function isPrivilegedRole(role) {
  * =========================
  * PRIVILEGED MIDDLEWARE
  * =========================
- * FIX: explicitly safe + logs role for debugging
+ * Use for business operations (vehicles, accounts, users)
  */
 export function requirePrivileged(req, res, next) {
   if (!req.user) {
@@ -98,9 +101,7 @@ export function requirePrivileged(req, res, next) {
     });
   }
 
-  const allowed = isPrivilegedRole(req.user.role);
-
-  if (!allowed) {
+  if (!isPrivilegedRole(req.user.role)) {
     return res.status(403).json({
       success: false,
       message: "Forbidden: insufficient permissions",

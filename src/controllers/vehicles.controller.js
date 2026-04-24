@@ -53,7 +53,6 @@ export async function getVehicles(req, res) {
 
     const params = [];
 
-    // clients scoped to account only
     if (!isPrivileged) {
       if (!accountId) {
         return res.status(401).json({
@@ -74,7 +73,6 @@ export async function getVehicles(req, res) {
       success: true,
       data: result.rows,
     });
-
   } catch (error) {
     console.error("getVehicles error:", error);
 
@@ -135,7 +133,6 @@ export async function getVehicleById(req, res) {
       success: true,
       data: result.rows[0],
     });
-
   } catch (error) {
     console.error("getVehicleById error:", error);
 
@@ -244,7 +241,6 @@ export async function createVehicle(req, res) {
       success: true,
       data: result.rows[0],
     });
-
   } catch (error) {
     console.error("createVehicle error:", error);
 
@@ -256,7 +252,7 @@ export async function createVehicle(req, res) {
 }
 
 // ======================================================
-// UPDATE VEHICLE
+// UPDATE VEHICLE (IMPROVED SAFE VERSION)
 // ======================================================
 export async function updateVehicle(req, res) {
   try {
@@ -270,14 +266,26 @@ export async function updateVehicle(req, res) {
       });
     }
 
-    if (year !== undefined && !isValidYear(year)) {
+    const numericYear =
+      year !== undefined && year !== null ? Number(year) : null;
+
+    if (numericYear !== null && Number.isNaN(numericYear)) {
+      return res.status(400).json({
+        success: false,
+        message: "Year must be a number",
+      });
+    }
+
+    if (
+      numericYear !== null &&
+      (numericYear < 1900 ||
+        numericYear > new Date().getFullYear() + 1)
+    ) {
       return res.status(400).json({
         success: false,
         message: "Invalid vehicle year",
       });
     }
-
-    const isPrivileged = canAccessAllVehicles(req);
 
     const existing = await query(
       `SELECT * FROM vehicles WHERE id = $1`,
@@ -295,19 +303,7 @@ export async function updateVehicle(req, res) {
 
     let finalAccountId = vehicle.account_id;
 
-    if (isPrivileged && account_id) {
-      const accCheck = await query(
-        `SELECT id FROM accounts WHERE id = $1 LIMIT 1`,
-        [account_id]
-      );
-
-      if (!accCheck.rows.length) {
-        return res.status(404).json({
-          success: false,
-          message: "Target account not found",
-        });
-      }
-
+    if (account_id) {
       finalAccountId = account_id;
     }
 
@@ -318,26 +314,30 @@ export async function updateVehicle(req, res) {
         make = COALESCE($1, make),
         model = COALESCE($2, model),
         year = COALESCE($3, year),
-        account_id = $4
+        account_id = COALESCE($4, account_id)
       WHERE id = $5
       RETURNING *
       `,
-      [make, model, year, finalAccountId, id]
+      [
+        make ?? null,
+        model ?? null,
+        numericYear ?? null,
+        finalAccountId ?? null,
+        id,
+      ]
     );
 
-    // ✅ SAFE LOG (FIXED)
     console.log("Vehicle updated:", {
       vehicleId: id,
       updatedBy: req.user?.id,
       role: req.user?.role,
-      newAccountId: finalAccountId,
+      accountId: req.user?.accountId,
     });
 
     return res.json({
       success: true,
       data: result.rows[0],
     });
-
   } catch (error) {
     console.error("updateVehicle error:", error);
 
@@ -397,7 +397,6 @@ export async function deleteVehicle(req, res) {
       success: true,
       message: "Vehicle deleted",
     });
-
   } catch (error) {
     console.error("deleteVehicle error:", error);
 
