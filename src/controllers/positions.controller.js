@@ -22,13 +22,12 @@ function isPrivileged(req) {
  */
 async function loadLatestFromDb(req) {
   const result = await query(`
-    SELECT *
-    FROM latest_positions
-    ORDER BY received_at DESC
-    LIMIT 50
+    SELECT COUNT(*) AS total FROM latest_positions
   `);
 
-  return result.rows;
+  console.log("🔥 RAW COUNT RESULT:", result.rows);
+
+  return [];
 }
 async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
   const clauses = [`d.device_uid = $1`];
