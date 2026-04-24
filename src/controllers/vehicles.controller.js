@@ -29,7 +29,7 @@ function isValidYear(year) {
 }
 
 // ======================================================
-// GET ALL VEHICLES
+// GET ALL VEHICLES (OPTIMIZED + SEARCH + PAGINATION)
 // ======================================================
 export async function getVehicles(req, res) {
   try {
@@ -37,10 +37,15 @@ export async function getVehicles(req, res) {
     const accountId = getAccountId(req);
 
     // =========================
-    // PAGINATION INPUTS
+    // PAGINATION
     // =========================
     const limit = Math.min(parseInt(req.query.limit || "200"), 500);
     const offset = Math.max(parseInt(req.query.offset || "0"), 0);
+
+    // =========================
+    // SEARCH (NEW FIX)
+    // =========================
+    const search = req.query.search?.trim()?.toLowerCase() || null;
 
     // =========================
     // BASE QUERY
@@ -60,10 +65,15 @@ export async function getVehicles(req, res) {
       FROM vehicles v
     `;
 
+    let countSql = `SELECT COUNT(*) FROM vehicles v`;
+
     const params = [];
+    const countParams = [];
+
+    let where = [];
 
     // =========================
-    // ACCOUNT FILTERING
+    // ACCOUNT FILTER
     // =========================
     if (!isPrivileged) {
       if (!accountId) {
@@ -73,23 +83,41 @@ export async function getVehicles(req, res) {
         });
       }
 
-      sql += ` WHERE v.account_id = $1 `;
       params.push(accountId);
-    }
-
-    // =========================
-    // COUNT QUERY (for frontend pagination)
-    // =========================
-    let countSql = `SELECT COUNT(*) FROM vehicles v`;
-    const countParams = [];
-
-    if (!isPrivileged) {
-      countSql += ` WHERE v.account_id = $1 `;
       countParams.push(accountId);
+
+      where.push(`v.account_id = $${params.length}`);
     }
 
     // =========================
-    // FINAL SORT + PAGINATION
+    // SEARCH FILTER (IMPORTANT FIX)
+    // =========================
+    if (search) {
+      params.push(`%${search}%`);
+      countParams.push(`%${search}%`);
+
+      const searchParamIndex = params.length;
+
+      where.push(`
+        (
+          LOWER(v.plate_number) LIKE $${searchParamIndex}
+          OR LOWER(v.unit_name) LIKE $${searchParamIndex}
+          OR LOWER(v.make) LIKE $${searchParamIndex}
+          OR LOWER(v.model) LIKE $${searchParamIndex}
+        )
+      `);
+    }
+
+    // =========================
+    // APPLY WHERE
+    // =========================
+    if (where.length > 0) {
+      sql += ` WHERE ` + where.join(" AND ");
+      countSql += ` WHERE ` + where.join(" AND ");
+    }
+
+    // =========================
+    // FINAL ORDER + PAGINATION
     // =========================
     sql += ` ORDER BY v.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
 
@@ -286,7 +314,7 @@ export async function createVehicle(req, res) {
 }
 
 // ======================================================
-// UPDATE VEHICLE (IMPROVED SAFE VERSION)
+// UPDATE VEHICLE
 // ======================================================
 export async function updateVehicle(req, res) {
   try {
@@ -335,11 +363,7 @@ export async function updateVehicle(req, res) {
 
     const vehicle = existing.rows[0];
 
-    let finalAccountId = vehicle.account_id;
-
-    if (account_id) {
-      finalAccountId = account_id;
-    }
+    const finalAccountId = account_id ?? vehicle.account_id;
 
     const result = await query(
       `
@@ -360,13 +384,6 @@ export async function updateVehicle(req, res) {
         id,
       ]
     );
-
-    console.log("Vehicle updated:", {
-      vehicleId: id,
-      updatedBy: req.user?.id,
-      role: req.user?.role,
-      accountId: req.user?.accountId,
-    });
 
     return res.json({
       success: true,
