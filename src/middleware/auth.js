@@ -6,11 +6,15 @@ import jwt from "jsonwebtoken";
  * =========================
  */
 function getTokenFromHeader(req) {
-  const authHeader = req.headers.authorization || "";
+  const authHeader = req.headers.authorization;
 
-  if (!authHeader.startsWith("Bearer ")) return null;
+  if (!authHeader) return null;
 
-  return authHeader.slice(7).trim();
+  const parts = authHeader.split(" ");
+
+  if (parts.length !== 2 || parts[0] !== "Bearer") return null;
+
+  return parts[1];
 }
 
 /**

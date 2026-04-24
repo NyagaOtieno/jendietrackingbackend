@@ -9,7 +9,7 @@ import {
 
 import {
   requireAuth,
-  requirePrivileged,
+  requirePrivileged, // ✅ THIS IS THE FIX
 } from "../middleware/auth.js";
 
 const router = express.Router();

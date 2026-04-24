@@ -405,3 +405,9 @@ export async function deleteVehicle(req, res) {
     });
   }
 }
+console.log("Vehicle updated", {
+  vehicleId: id,
+  updatedBy: req.user.id,
+  role: req.user.role,
+  newAccountId: finalAccountId,
+});
