@@ -20,12 +20,19 @@ function isValidId(id) {
   return id !== undefined && id !== null && id !== "";
 }
 
+function isValidYear(year) {
+  return (
+    typeof year === "number" &&
+    year >= 1900 &&
+    year <= new Date().getFullYear() + 1
+  );
+}
+
 // ======================================================
 // GET ALL VEHICLES
 // ======================================================
 export async function getVehicles(req, res) {
   try {
-    const user = getUser(req);
     const isPrivileged = canAccessAllVehicles(req);
     const accountId = getAccountId(req);
 
@@ -46,7 +53,7 @@ export async function getVehicles(req, res) {
 
     const params = [];
 
-    // 🔐 ONLY CLIENTS ARE SCOPED TO ACCOUNT
+    // 🔐 CLIENTS ONLY SEE THEIR ACCOUNT
     if (!isPrivileged) {
       if (!accountId) {
         return res.status(401).json({
@@ -74,7 +81,10 @@ export async function getVehicles(req, res) {
     return res.status(500).json({
       success: false,
       message: "Failed to load vehicles",
-      error: process.env.NODE_ENV === "development" ? error.message : undefined,
+      error:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
     });
   }
 }
@@ -163,16 +173,49 @@ export async function createVehicle(req, res) {
       });
     }
 
-    const isPrivileged = canAccessAllVehicles(req);
-    const accountId = getAccountId(req);
-
-    const finalAccountId = isPrivileged ? (account_id || accountId) : accountId;
-
-    if (!finalAccountId) {
+    if (year !== undefined && !isValidYear(year)) {
       return res.status(400).json({
         success: false,
-        message: "Account context missing for vehicle creation",
+        message: "Invalid vehicle year",
       });
+    }
+
+    const isPrivileged = canAccessAllVehicles(req);
+    const userAccountId = getAccountId(req);
+
+    let finalAccountId;
+
+    if (isPrivileged) {
+      if (!account_id) {
+        return res.status(400).json({
+          success: false,
+          message: "account_id is required for privileged users",
+        });
+      }
+
+      // ✅ Validate account exists
+      const accCheck = await query(
+        `SELECT id FROM accounts WHERE id = $1 LIMIT 1`,
+        [account_id]
+      );
+
+      if (!accCheck.rows.length) {
+        return res.status(404).json({
+          success: false,
+          message: "Account not found",
+        });
+      }
+
+      finalAccountId = account_id;
+    } else {
+      if (!userAccountId) {
+        return res.status(400).json({
+          success: false,
+          message: "Account context missing",
+        });
+      }
+
+      finalAccountId = userAccountId;
     }
 
     const result = await query(
@@ -232,8 +275,14 @@ export async function updateVehicle(req, res) {
       });
     }
 
+    if (year !== undefined && !isValidYear(year)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid vehicle year",
+      });
+    }
+
     const isPrivileged = canAccessAllVehicles(req);
-    const accountId = getAccountId(req);
 
     const existing = await query(
       `SELECT * FROM vehicles WHERE id = $1`,
@@ -249,9 +298,24 @@ export async function updateVehicle(req, res) {
 
     const vehicle = existing.rows[0];
 
-    const finalAccountId = isPrivileged
-      ? (account_id || vehicle.account_id)
-      : vehicle.account_id;
+    let finalAccountId = vehicle.account_id;
+
+    if (isPrivileged && account_id) {
+      // ✅ Validate account exists
+      const accCheck = await query(
+        `SELECT id FROM accounts WHERE id = $1 LIMIT 1`,
+        [account_id]
+      );
+
+      if (!accCheck.rows.length) {
+        return res.status(404).json({
+          success: false,
+          message: "Target account not found",
+        });
+      }
+
+      finalAccountId = account_id;
+    }
 
     const result = await query(
       `

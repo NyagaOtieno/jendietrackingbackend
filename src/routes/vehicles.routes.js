@@ -6,14 +6,29 @@ import {
   updateVehicle,
   deleteVehicle,
 } from "../controllers/vehicles.controller.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+
+import {
+  requireAuth,
+  requirePrivileged,
+} from "../middleware/auth.js";
 
 const router = express.Router();
 
+/**
+ * =========================
+ * PUBLIC (AUTHENTICATED)
+ * =========================
+ */
 router.get("/", requireAuth, getVehicles);
 router.get("/:id", requireAuth, getVehicleById);
-router.post("/", requireAuth, requireRole("admin"), createVehicle);
-router.put("/:id", requireAuth, requireRole("admin"), updateVehicle);
-router.delete("/:id", requireAuth, requireRole("admin"), deleteVehicle);
+
+/**
+ * =========================
+ * PRIVILEGED (NON-CLIENT)
+ * =========================
+ */
+router.post("/", requireAuth, requirePrivileged, createVehicle);
+router.put("/:id", requireAuth, requirePrivileged, updateVehicle);
+router.delete("/:id", requireAuth, requirePrivileged, deleteVehicle);
 
 export default router;
