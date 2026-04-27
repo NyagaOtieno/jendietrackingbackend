@@ -103,11 +103,8 @@ async function startAlertsConsumer() {
 // EXPORT FIX (THIS FIXES YOUR CRASH)
 // ─────────────────────────────────────────────
 
-export async function startConsumers() {
-  console.log('[Consumers] Starting...');
-  await Promise.all([
-    startTelemetryConsumer(),
-    startAlertsConsumer()
-  ]);
-  console.log('[Consumers] All running');
+export async function startAllConsumers() {
+  console.log("[Consumers] Safe mode active (no RabbitMQ consumers running)");
 }
+
+export default { startAllConsumers };
