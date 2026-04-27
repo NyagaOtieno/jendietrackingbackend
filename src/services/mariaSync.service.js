@@ -5,6 +5,12 @@ import { createPool } from "mariadb";
 import { pgPool } from "../config/db.js";
 import { publishAlert } from "../queue/publisher.js";
 
+// ─── Lightweight Structured Logger ────────────────────────────────────────────
+const log = (level, msg, meta = {}) => {
+  const time = new Date().toISOString();
+  console.log(JSON.stringify({ time, level, msg, ...meta }));
+};
+
 // ─── State ────────────────────────────────────────────────────────────────────
 let isSyncRunning = false;
 export { isSyncRunning };
@@ -47,7 +53,7 @@ async function getMariaConnection(retries = 3) {
       ]);
       return conn;
     } catch (err) {
-      console.warn(`⚠️ Maria retry ${i + 1}: ${err.message}`);
+      log("warn", "Maria retry", { attempt: i + 1, error: err.message });
       if (i === retries - 1) throw err;
       await new Promise((r) => setTimeout(r, 3000));
     }
@@ -59,7 +65,7 @@ export async function syncVehicles() {
   let conn;
   try {
     conn = await getMariaConnection();
-    console.log("🔗 MariaDB connected for vehicle sync");
+    log("info", "MariaDB connected for vehicle sync");
 
     const rows = await conn.query(`
       SELECT
@@ -74,6 +80,8 @@ export async function syncVehicles() {
       LEFT JOIN device d ON d.uniqueid = CONCAT('0', r.serial)
       WHERE r.serial IS NOT NULL
     `);
+
+    log("info", "Vehicle fetch complete", { count: rows.length });
 
     let vehicles = 0;
     let devices = 0;
@@ -127,7 +135,7 @@ export async function syncVehicles() {
       }
     }
 
-    console.log(`✅ Vehicles: ${vehicles} | Devices: ${devices}`);
+    log("info", "Vehicle sync done", { vehicles, devices });
   } finally {
     conn?.release();
   }
@@ -165,11 +173,17 @@ async function syncDeviceTelemetry(device, conn) {
     );
 
     if (!rows.length) {
-      console.log(`📭 ${deviceUid}: no new data`);
+      log("info", "No new data", { deviceUid });
       return { count: 0, maxId: lastId };
     }
 
-    console.log(`📥 ${deviceUid}: fetched ${rows.length}`);
+    log("info", "Maria fetch", {
+      deviceUid,
+      fetched: rows.length,
+      lastId,
+    });
+
+    log("debug", "Sample row", { deviceUid, sample: rows[0] });
 
     let maxId = lastId;
     const mapped = [];
@@ -186,6 +200,14 @@ async function syncDeviceTelemetry(device, conn) {
         rawTime && rawTime.getFullYear() > 2000
           ? rawTime
           : new Date(r.servertime);
+
+      if (deviceTime.getFullYear() < 2020) {
+        log("warn", "Bad deviceTime", {
+          deviceUid,
+          deviceTime,
+          servertime: r.servertime,
+        });
+      }
 
       const item = {
         pgDeviceId,
@@ -212,14 +234,17 @@ async function syncDeviceTelemetry(device, conn) {
       if (valid) validRows.push(item);
     }
 
-    console.log(`✅ ${deviceUid}: valid ${validRows.length}`);
+    log("info", "Validation result", {
+      deviceUid,
+      total: mapped.length,
+      valid: validRows.length,
+      invalid: mapped.length - validRows.length,
+    });
 
-    // ─── A. Insert telemetry history
-    const insertRows = mapped;
-
-    if (insertRows.length) {
+    // ─── Insert telemetry
+    if (mapped.length) {
       const values = [];
-      const placeholders = insertRows.map((r, i) => {
+      const placeholders = mapped.map((r, i) => {
         const b = i * 6;
         values.push(
           r.pgDeviceId,
@@ -239,13 +264,34 @@ async function syncDeviceTelemetry(device, conn) {
          ON CONFLICT DO NOTHING`,
         values
       );
+
+      const check = await pgPool.query(
+        "SELECT COUNT(*) FROM telemetry WHERE device_id = $1",
+        [pgDeviceId]
+      );
+
+      log("info", "Telemetry verification", {
+        deviceUid,
+        count: check.rows[0].count,
+      });
     }
 
-    // ─── B. Latest position (ONLY valid)
+    // ─── Latest position
     if (validRows.length) {
       const latest = validRows.reduce((a, b) =>
         a.deviceTime > b.deviceTime ? a : b
       );
+
+      const existing = await pgPool.query(
+        "SELECT device_time FROM latest_positions WHERE device_id = $1",
+        [latest.pgDeviceId]
+      );
+
+      log("debug", "Latest compare", {
+        deviceUid,
+        incoming: latest.deviceTime,
+        existing: existing.rows[0]?.device_time || null,
+      });
 
       await pgPool.query(
         `INSERT INTO latest_positions
@@ -270,10 +316,9 @@ async function syncDeviceTelemetry(device, conn) {
         ]
       );
     } else {
-      console.log(`⚠️ ${deviceUid}: no valid coordinates`);
+      log("warn", "No valid coordinates", { deviceUid });
     }
 
-    // ─── C. Alerts
     for (const r of mapped) {
       if (r.alarmcode) {
         try {
@@ -287,9 +332,19 @@ async function syncDeviceTelemetry(device, conn) {
       }
     }
 
+    log("info", "Device sync result", {
+      deviceUid,
+      processed: mapped.length,
+      newMaxId: maxId,
+      oldPositionId: lastId,
+    });
+
     return { count: mapped.length, maxId };
   } catch (err) {
-    console.error(`❌ Device ${device.device_uid}: ${err.message}`);
+    log("error", "Device sync error", {
+      deviceUid: device.device_uid,
+      error: err.message,
+    });
     return { count: 0, maxId: device.positionid || 0 };
   }
 }
@@ -299,13 +354,13 @@ export async function syncTelemetry() {
   let conn;
   try {
     conn = await getMariaConnection();
-    console.log("🔗 MariaDB connected for telemetry sync");
+    log("info", "MariaDB connected for telemetry sync");
 
     const { rows: devices } = await pgPool.query(
       "SELECT device_uid, positionid FROM devices WHERE device_uid IS NOT NULL"
     );
 
-    console.log(`🔄 Syncing ${devices.length} devices`);
+    log("info", "Starting device sync", { devices: devices.length });
 
     let total = 0;
 
@@ -332,12 +387,18 @@ export async function syncTelemetry() {
         }
 
         if (res.status === "rejected") {
-          console.error(`❌ ${dev.device_uid}: ${res.reason?.message}`);
+          log("error", "Device promise failed", {
+            deviceUid: dev.device_uid,
+            error: res.reason?.message,
+          });
         }
       }
     }
 
-    if (total > 0) console.log(`✅ Synced: ${total} rows`);
+    log("info", "Telemetry sync summary", {
+      devices: devices.length,
+      totalSynced: total,
+    });
   } finally {
     conn?.release();
   }
@@ -353,12 +414,12 @@ export async function runMariaSync() {
   isSyncRunning = true;
 
   try {
-    console.log("🚀 Maria Sync started");
+    log("info", "Maria Sync started");
     await syncVehicles();
     await syncTelemetry();
-    console.log("✅ Maria Sync complete");
+    log("info", "Maria Sync complete");
   } catch (err) {
-    console.error("❌ Sync error:", err.message);
+    log("error", "Sync error", { error: err.message });
   } finally {
     isSyncRunning = false;
     await releaseLock();

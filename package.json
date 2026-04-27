@@ -5,9 +5,14 @@
   "main": "src/server.js",
   "type": "module",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
-  },
+  "start": "node src/server.js",
+  "dev": "node --watch src/server.js",
+
+  "migrate": "node src/scripts/migrate.js",
+  "seed:admin": "node src/scripts/seedAdmin.js",
+  "seed:all": "node src/scripts/seedAll.js",
+  "db:reset": "node src/scripts/resetDb.js"
+},
   "engines": {
     "node": ">=18"
   },
