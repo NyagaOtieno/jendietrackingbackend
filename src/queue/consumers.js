@@ -10,6 +10,12 @@ import { QUEUES, PREFETCH_COUNT } from './config.js';
 
 async function startTelemetryConsumer() {
   const channel = getChannel();
+
+  if (!channel) {
+    console.warn('[Consumer] RabbitMQ unavailable → telemetry consumer disabled');
+    return;
+  }
+
   await channel.prefetch(PREFETCH_COUNT);
 
   channel.consume(QUEUES.TELEMETRY.name, async (msg) => {
@@ -79,6 +85,12 @@ async function bulkInsertTelemetry(rows) {
 
 async function startAlertsConsumer() {
   const channel = getChannel();
+
+  if (!channel) {
+    console.warn('[Consumer] RabbitMQ unavailable → alerts consumer disabled');
+    return;
+  }
+
   await channel.prefetch(10);
 
   channel.consume(QUEUES.ALERTS.name, async (msg) => {
@@ -113,7 +125,17 @@ async function startAlertsConsumer() {
 
   console.log('[Consumer] Alerts consumer started');
 }
+export async function initQueue() {
+  await connect();
 
+  const channel = getChannel();
+  if (!channel) {
+    console.warn('[Queue] Running in OFFLINE mode (no RabbitMQ)');
+    return;
+  }
+
+  await startAllConsumers();
+}
 // ─── Start all consumers ──────────────────────────────────────────────────────
 
 export async function startAllConsumers() {

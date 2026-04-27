@@ -30,18 +30,19 @@ export async function connect() {
     }
 
     console.log('[RabbitMQ] Connected and ready');
-
-    return new Promise((resolve) => {
-      resolve(channel); // 🔥 ensures fully ready before usage
-    });
+    return channel;
 
   } catch (err) {
-    console.error('[RabbitMQ] Failed:', err.message);
-    setTimeout(connect, 5000);
+    console.warn('[RabbitMQ] DISABLED (safe mode):', err.message);
+
+    // IMPORTANT: do NOT crash system
+    connection = null;
+    channel = null;
+
+    return null;
   }
 }
 
 export function getChannel() {
-  if (!channel) throw new Error('RabbitMQ channel not ready — still connecting');
-  return channel;
+  return channel; // allow null safely
 }
