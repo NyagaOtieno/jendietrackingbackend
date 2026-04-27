@@ -1,21 +1,13 @@
-// src/queue/consumers.js
 import { pgPool } from '../config/db.js';
 import { getChannel } from './connection.js';
 import { QUEUES, PREFETCH_COUNT } from './config.js';
 
-// ─── Telemetry Consumer ───────────────────────────────────────────────────────
-// Handles messages from both sources via the same { batch: row[] } envelope:
-//   • MariaDB sync  → 100 rows per message (high throughput path)
-//   • HTTP device POST → 1 row per message (real-time path)
+// ─────────────────────────────────────────────
+// TELEMETRY CONSUMER
+// ─────────────────────────────────────────────
 
 async function startTelemetryConsumer() {
   const channel = getChannel();
-
-  if (!channel) {
-    console.warn('[Consumer] RabbitMQ unavailable → telemetry consumer disabled');
-    return;
-  }
-
   await channel.prefetch(PREFETCH_COUNT);
 
   channel.consume(QUEUES.TELEMETRY.name, async (msg) => {
@@ -29,8 +21,8 @@ async function startTelemetryConsumer() {
         return;
       }
     } catch (err) {
-      console.error('[Consumer] Malformed telemetry message:', err.message);
-      channel.nack(msg, false, false); // → dead letter
+      console.error('[Telemetry] Bad message:', err.message);
+      channel.nack(msg, false, false);
       return;
     }
 
@@ -38,20 +30,14 @@ async function startTelemetryConsumer() {
       await bulkInsertTelemetry(rows);
       channel.ack(msg);
     } catch (err) {
-      console.error('[Consumer] Telemetry insert failed:', err.message);
-      // Requeue once — if Postgres is temporarily unavailable.
-      // On second failure the message goes to dead letter.
+      console.error('[Telemetry] Insert failed:', err.message);
       channel.nack(msg, false, true);
     }
   });
 
-  console.log('[Consumer] Telemetry consumer started');
+  console.log('[Consumer] Telemetry started');
 }
 
-/**
- * Bulk INSERT into the telemetry table.
- * Full 24-column schema matching mariaSync.service.js exactly.
- */
 async function bulkInsertTelemetry(rows) {
   const placeholders = rows.map((_, i) => {
     const b = i * 6;
@@ -62,86 +48,66 @@ async function bulkInsertTelemetry(rows) {
     r.deviceId,
     Number(r.latitude) || 0,
     Number(r.longitude) || 0,
-    Number(r.speedKph ?? r.speed ?? 0),
-    Number(r.heading) || null,
+    Number(r.speedKph ?? 0),
+    Number(r.heading) || 0,
     r.deviceTime ? new Date(r.deviceTime) : new Date(),
   ]);
 
   await pgPool.query(
-    `INSERT INTO telemetry (
-      device_id,
-      latitude,
-      longitude,
-      speed_kph,
-      heading,
-      device_time
-    ) VALUES ${placeholders}
-    ON CONFLICT DO NOTHING`,
+    `INSERT INTO telemetry
+     (device_id, latitude, longitude, speed_kph, heading, device_time)
+     VALUES ${placeholders}
+     ON CONFLICT DO NOTHING`,
     values
   );
 }
 
-// ─── Alerts Consumer ──────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// ALERT CONSUMER
+// ─────────────────────────────────────────────
 
 async function startAlertsConsumer() {
   const channel = getChannel();
-
-  if (!channel) {
-    console.warn('[Consumer] RabbitMQ unavailable → alerts consumer disabled');
-    return;
-  }
-
   await channel.prefetch(10);
 
   channel.consume(QUEUES.ALERTS.name, async (msg) => {
     if (!msg) return;
+
     try {
       const data = JSON.parse(msg.content.toString());
 
       await pgPool.query(
         `INSERT INTO vehicle_alerts
-           (device_id, alert_type, severity, message, recorded_at)
-         VALUES ($1, $2, $3, $4, $5)`,
+         (device_id, alert_type, severity, message, recorded_at)
+         VALUES ($1,$2,$3,$4,$5)`,
         [
           data.deviceId,
-          data.type      || 'unknown',
-          data.severity  || 'info',
-          data.message   || null,
-          data.recordedAt || new Date().toISOString(),
+          data.type || 'unknown',
+          data.severity || 'info',
+          data.message || null,
+          new Date(),
         ]
       );
 
-      if (data.severity === 'critical') {
-        // TODO: fire webhook / push notification
-        console.warn(`[ALERT] Critical — device ${data.deviceId}: ${data.message}`);
-      }
-
       channel.ack(msg);
     } catch (err) {
-      console.error('[Consumer] Alert error:', err.message);
+      console.error('[Alert] Error:', err.message);
       channel.nack(msg, false, false);
     }
   });
 
-  console.log('[Consumer] Alerts consumer started');
+  console.log('[Consumer] Alerts started');
 }
-export async function initQueue() {
-  await connect();
 
-  const channel = getChannel();
-  if (!channel) {
-    console.warn('[Queue] Running in OFFLINE mode (no RabbitMQ)');
-    return;
-  }
+// ─────────────────────────────────────────────
+// EXPORT FIX (THIS FIXES YOUR CRASH)
+// ─────────────────────────────────────────────
 
-  await startAllConsumers();
-}
-// ─── Start all consumers ──────────────────────────────────────────────────────
-
-export async function startAllConsumers() {
+export async function startConsumers() {
+  console.log('[Consumers] Starting...');
   await Promise.all([
     startTelemetryConsumer(),
-    startAlertsConsumer(),
+    startAlertsConsumer()
   ]);
-  console.log('[Consumers] All consumers running');
+  console.log('[Consumers] All running');
 }
