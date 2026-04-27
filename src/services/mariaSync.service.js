@@ -5,21 +5,6 @@ import { createPool } from "mariadb";
 import { pgPool } from "../config/db.js";
 import { publishAlert } from "../queue/publisher.js";
 
-// ─── Structured Logger ───────────────────────────────────────────────────────
-const log = (level, msg, meta = {}) => {
-  console.log(JSON.stringify({
-    time: new Date().toISOString(),
-    level,
-    msg,
-    ...meta
-  }));
-};
-
-// ─── State ────────────────────────────────────────────────────────────────────
-let isSyncRunning = false;
-export { isSyncRunning };
-
-// ─── MariaDB Pool ─────────────────────────────────────────────────────────────
 const mariaPool = createPool({
   host: process.env.MARIA_DB_HOST,
   port: Number(process.env.MARIA_DB_PORT || 3306),
@@ -27,13 +12,12 @@ const mariaPool = createPool({
   password: process.env.MARIA_DB_PASSWORD,
   database: process.env.MARIA_DB_NAME || "uradi",
   connectionLimit: 5,
-  connectTimeout: 10000,
-  acquireTimeout: 15000,
 });
 
-const DEVICE_CONCURRENCY = Number(process.env.DEVICE_CONCURRENCY || 10);
+let isSyncRunning = false;
+export { isSyncRunning };
 
-// ─── Advisory Lock ────────────────────────────────────────────────────────────
+// ───────────────── LOCK ─────────────────
 async function acquireLock() {
   const res = await pgPool.query(
     "SELECT pg_try_advisory_lock(778899) AS locked"
@@ -45,33 +29,17 @@ async function releaseLock() {
   await pgPool.query("SELECT pg_advisory_unlock(778899)");
 }
 
-// ─── Maria Connection ────────────────────────────────────────────────────────
-async function getMariaConnection(retries = 3) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await Promise.race([
-        mariaPool.getConnection(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("MariaDB timeout")), 12000)
-        ),
-      ]);
-    } catch (err) {
-      log("warn", "Maria retry", { attempt: i + 1, error: err.message });
-      if (i === retries - 1) throw err;
-      await new Promise(r => setTimeout(r, 3000));
-    }
-  }
+// ───────────────── CONNECTION ─────────────────
+async function getMariaConnection() {
+  return mariaPool.getConnection();
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// 1. VEHICLES SYNC
-// ──────────────────────────────────────────────────────────────────────────────
+// ───────────────── VEHICLES SYNC ─────────────────
 export async function syncVehicles() {
   let conn;
 
   try {
     conn = await getMariaConnection();
-    log("info", "Maria connected (vehicles)");
 
     const rows = await conn.query(`
       SELECT r.serial, r.reg_no, r.vmodel, r.install_date, r.pstatus,
@@ -82,14 +50,9 @@ export async function syncVehicles() {
       WHERE r.serial IS NOT NULL
     `);
 
-    let vehicles = 0;
-    let devices = 0;
-
     for (const r of rows) {
       const serial = String(r.serial).trim();
       if (!serial) continue;
-
-      const plate = String(r.reg_no || `PLATE_${serial}`).substring(0, 100);
 
       await pgPool.query(
         `INSERT INTO vehicles (serial, plate_number, unit_name, model, status, created_at)
@@ -101,15 +64,13 @@ export async function syncVehicles() {
            status = EXCLUDED.status`,
         [
           serial,
-          plate,
+          String(r.reg_no || `PLATE_${serial}`).substring(0, 100),
           `Unit ${serial}`,
           r.vmodel || "",
           r.pstatus || "inactive",
           r.install_date || new Date(),
         ]
       );
-
-      vehicles++;
 
       if (r.device_uid) {
         await pgPool.query(
@@ -118,28 +79,14 @@ export async function syncVehicles() {
            ON CONFLICT (device_uid) DO UPDATE SET serial = EXCLUDED.serial`,
           [String(r.device_uid), serial]
         );
-
-        await pgPool.query(
-          `UPDATE devices
-           SET vehicle_id = (SELECT id FROM vehicles WHERE serial = $1 LIMIT 1)
-           WHERE device_uid = $2 AND vehicle_id IS NULL`,
-          [serial, String(r.device_uid)]
-        );
-
-        devices++;
       }
     }
-
-    log("info", "Vehicles synced", { vehicles, devices });
-
   } finally {
     conn?.release();
   }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// 2. DEVICE TELEMETRY
-// ──────────────────────────────────────────────────────────────────────────────
+// ───────────────── DEVICE SYNC ─────────────────
 async function syncDeviceTelemetry(device, conn) {
   try {
     const deviceUid = device.device_uid;
@@ -174,9 +121,8 @@ async function syncDeviceTelemetry(device, conn) {
     if (!rows.length) return { count: 0, maxId: lastId };
 
     let maxId = lastId;
-
     const inserts = [];
-    let latestValid = null;
+    let latest = null;
 
     for (const r of rows) {
       if (r.id > maxId) maxId = r.id;
@@ -184,7 +130,14 @@ async function syncDeviceTelemetry(device, conn) {
       const lat = Number(r.latitude);
       const lon = Number(r.longitude);
 
-      const deviceTime = new Date(r.devicetime || r.servertime);
+      const item = {
+        pgDeviceId,
+        lat,
+        lon,
+        speed: Number(r.speed) || 0,
+        heading: Number(r.course) || 0,
+        deviceTime: new Date(r.devicetime || r.servertime),
+      };
 
       const valid =
         Number.isFinite(lat) &&
@@ -192,35 +145,28 @@ async function syncDeviceTelemetry(device, conn) {
         lat !== 0 &&
         lon !== 0;
 
-      const item = {
-        pgDeviceId,
-        lat,
-        lon,
-        speed: Number(r.speed) || 0,
-        heading: Number(r.course) || 0,
-        deviceTime
-      };
-
-      if (valid) latestValid = item;
+      if (valid) latest = item;
 
       inserts.push(item);
     }
 
-    // ─── BULK INSERT (FIXED SAFE VERSION)
+    // BULK INSERT (SAFE)
     if (inserts.length) {
       const values = [];
-      const placeholders = inserts.map((r, i) => {
-        const b = i * 6;
-        values.push(
-          r.pgDeviceId,
-          r.lat,
-          r.lon,
-          r.speed,
-          r.heading,
-          r.deviceTime
-        );
-        return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6})`;
-      }).join(",");
+      const placeholders = inserts
+        .map((r, i) => {
+          const b = i * 6;
+          values.push(
+            r.pgDeviceId,
+            r.lat,
+            r.lon,
+            r.speed,
+            r.heading,
+            r.deviceTime
+          );
+          return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6})`;
+        })
+        .join(",");
 
       await pgPool.query(
         `INSERT INTO telemetry
@@ -231,8 +177,8 @@ async function syncDeviceTelemetry(device, conn) {
       );
     }
 
-    // ─── latest_positions (ALWAYS SAFE)
-    if (latestValid) {
+    // latest position
+    if (latest) {
       await pgPool.query(
         `INSERT INTO latest_positions
          (device_id, latitude, longitude, speed_kph, heading, device_time, received_at, updated_at)
@@ -245,78 +191,47 @@ async function syncDeviceTelemetry(device, conn) {
            device_time = EXCLUDED.device_time,
            updated_at = NOW()`,
         [
-          latestValid.pgDeviceId,
-          latestValid.lat,
-          latestValid.lon,
-          latestValid.speed,
-          latestValid.heading,
-          latestValid.deviceTime
+          latest.pgDeviceId,
+          latest.lat,
+          latest.lon,
+          latest.speed,
+          latest.heading,
+          latest.deviceTime,
         ]
       );
     }
 
     return { count: inserts.length, maxId };
-
   } catch (err) {
-    log("error", "Device sync failed", {
-      deviceUid: device.device_uid,
-      error: err.message
-    });
-
     return { count: 0, maxId: device.positionid || 0 };
   }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// 3. SYNC TELEMETRY
-// ──────────────────────────────────────────────────────────────────────────────
+// ───────────────── TELEMETRY SYNC ─────────────────
 export async function syncTelemetry() {
-  let conn;
+  const conn = await getMariaConnection();
 
   try {
-    conn = await getMariaConnection();
-    log("info", "Maria connected (telemetry)");
-
     const { rows: devices } = await pgPool.query(
       "SELECT device_uid, positionid FROM devices WHERE device_uid IS NOT NULL"
     );
 
-    let total = 0;
+    for (const d of devices) {
+      const res = await syncDeviceTelemetry(d, conn);
 
-    for (let i = 0; i < devices.length; i += DEVICE_CONCURRENCY) {
-      const chunk = devices.slice(i, i + DEVICE_CONCURRENCY);
-
-      const results = await Promise.allSettled(
-        chunk.map(d => syncDeviceTelemetry(d, conn))
+      await pgPool.query(
+        `UPDATE devices
+         SET positionid = GREATEST(positionid, $1)
+         WHERE device_uid = $2`,
+        [res.maxId, d.device_uid]
       );
-
-      for (let j = 0; j < results.length; j++) {
-        const r = results[j];
-        const d = chunk[j];
-
-        if (r.status === "fulfilled") {
-          total += r.value.count;
-
-          await pgPool.query(
-            `UPDATE devices
-             SET positionid = GREATEST(positionid, $1)
-             WHERE device_uid = $2`,
-            [r.value.maxId, d.device_uid]
-          );
-        }
-      }
     }
-
-    log("info", "Sync complete", { total });
-
   } finally {
-    conn?.release();
+    conn.release();
   }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// 4. RUNNER
-// ──────────────────────────────────────────────────────────────────────────────
+// ───────────────── RUNNER ─────────────────
 export async function runMariaSync() {
   if (isSyncRunning) return;
 
@@ -328,8 +243,6 @@ export async function runMariaSync() {
   try {
     await syncVehicles();
     await syncTelemetry();
-  } catch (err) {
-    log("error", "Sync failed", { error: err.message });
   } finally {
     isSyncRunning = false;
     await releaseLock();
