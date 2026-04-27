@@ -3,10 +3,19 @@ import { getChannel } from './connection.js';
 import { QUEUES, PREFETCH_COUNT } from './config.js';
 
 // ─────────────────────────────────────────────
+// SAFE MODE FLAG (prevents crash if RabbitMQ is down)
+// ─────────────────────────────────────────────
+const RABBIT_DISABLED = true;
+
+// ─────────────────────────────────────────────
 // TELEMETRY CONSUMER
 // ─────────────────────────────────────────────
-
 async function startTelemetryConsumer() {
+  if (RABBIT_DISABLED) {
+    console.log('[Consumer] Telemetry disabled (safe mode)');
+    return;
+  }
+
   const channel = getChannel();
   await channel.prefetch(PREFETCH_COUNT);
 
@@ -38,10 +47,13 @@ async function startTelemetryConsumer() {
   console.log('[Consumer] Telemetry started');
 }
 
+// ─────────────────────────────────────────────
+// BULK INSERT TELEMETRY
+// ─────────────────────────────────────────────
 async function bulkInsertTelemetry(rows) {
   const placeholders = rows.map((_, i) => {
     const b = i * 6;
-    return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6})`;
+    return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6})`;
   }).join(',');
 
   const values = rows.flatMap(r => [
@@ -65,8 +77,12 @@ async function bulkInsertTelemetry(rows) {
 // ─────────────────────────────────────────────
 // ALERT CONSUMER
 // ─────────────────────────────────────────────
-
 async function startAlertsConsumer() {
+  if (RABBIT_DISABLED) {
+    console.log('[Consumer] Alerts disabled (safe mode)');
+    return;
+  }
+
   const channel = getChannel();
   await channel.prefetch(10);
 
@@ -100,11 +116,16 @@ async function startAlertsConsumer() {
 }
 
 // ─────────────────────────────────────────────
-// EXPORT FIX (THIS FIXES YOUR CRASH)
+// MAIN EXPORT (FIXES YOUR PM2 CRASH)
 // ─────────────────────────────────────────────
-
 export async function startAllConsumers() {
-  console.log("[Consumers] Safe mode active (no RabbitMQ consumers running)");
+  console.log('[Consumers] Initializing...');
+  await Promise.all([
+    startTelemetryConsumer(),
+    startAlertsConsumer()
+  ]);
+  console.log('[Consumers] Safe mode ready');
 }
 
+// optional default export (safe compatibility)
 export default { startAllConsumers };
