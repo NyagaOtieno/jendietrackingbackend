@@ -212,7 +212,7 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
  * START SERVER
  * =========================
  */
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 4001;
 
 async function startServer() {
   try {
