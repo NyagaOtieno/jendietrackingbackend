@@ -40,7 +40,7 @@ async function loadLatestFromDb(req) {
       COALESCE(v.account_id, 0) AS "accountId"
 
     FROM latest_positions lp
-    JOIN devices d ON d.id = lp.device_id
+    LEFT JOIN devices d ON d.id = lp.device_id
     LEFT JOIN vehicles v ON v.id = d.vehicle_id
   `;
 
