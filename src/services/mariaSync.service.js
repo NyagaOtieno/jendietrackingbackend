@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 // ✅ ESM-safe MariaDB import (CORRECT)
-import mariadb from "mariadb";
+import * as mariadb from "mariadb";
 
 import { pgPool } from "../config/db.js";
 import { publishAlert } from "../queue/publisher.js";
