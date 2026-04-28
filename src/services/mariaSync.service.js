@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import mariadb from "mariadb";
+import * as mariadb from "mariadb";
 import { pgPool } from "../config/db.js";
 
 // ─────────────────────────────────────────────
@@ -27,15 +27,13 @@ export { isSyncRunning };
 // ─────────────────────────────────────────────
 // MARIA DB POOL (FIXED ESM SAFE)
 // ─────────────────────────────────────────────
-const mariaPool = mariadb.createPool({
+const pool = mariadb.createPool({
   host: process.env.MARIA_DB_HOST,
-  port: Number(process.env.MARIA_DB_PORT || 3306),
   user: process.env.MARIA_DB_USER,
   password: process.env.MARIA_DB_PASSWORD,
-  database: process.env.MARIA_DB_NAME || "uradi",
-  connectionLimit: 5,
+  database: process.env.MARIA_DB_NAME,
+  connectionLimit: 10,
 });
-
 // ─────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────
