@@ -1,8 +1,8 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-// ✅ FIX: ESM-safe mariadb import
-import * as mariadb from "mariadb";
+// ✅ ESM-safe MariaDB import (CORRECT)
+import mariadb from "mariadb";
 
 import { pgPool } from "../config/db.js";
 import { publishAlert } from "../queue/publisher.js";
@@ -28,7 +28,7 @@ let isSyncRunning = false;
 export { isSyncRunning };
 
 // ─────────────────────────────────────────────
-// MARIA DB POOL (FIXED IMPORT USAGE)
+// MARIA DB POOL
 // ─────────────────────────────────────────────
 const mariaPool = mariadb.createPool({
   host: process.env.MARIA_DB_HOST,
@@ -48,7 +48,7 @@ const DEVICE_BATCH = Number(process.env.DEVICE_BATCH || 200);
 const EVENTS_BATCH = Number(process.env.EVENTS_BATCH || 200);
 
 // ─────────────────────────────────────────────
-// LOCK
+// LOCK (Postgres)
 // ─────────────────────────────────────────────
 async function acquireLock() {
   const res = await pgPool.query(
@@ -121,6 +121,7 @@ export async function syncVehicles() {
     }
 
     log("info", "Vehicle sync complete", { vehicles });
+
   } catch (e) {
     log("error", "Vehicle sync failed", { error: e.message });
   } finally {
@@ -129,7 +130,7 @@ export async function syncVehicles() {
 }
 
 // ─────────────────────────────────────────────
-// DEVICE SYNC (UNCHANGED LOGIC, SAFE)
+// DEVICE SYNC
 // ─────────────────────────────────────────────
 async function syncDevice(device, conn) {
   const deviceUid = device.device_uid;
@@ -280,6 +281,7 @@ export async function syncTelemetry() {
     }
 
     log("info", "Telemetry sync complete", { total, processed });
+
   } catch (e) {
     log("error", "Telemetry sync failed", { error: e.message });
   } finally {
@@ -288,7 +290,7 @@ export async function syncTelemetry() {
 }
 
 // ─────────────────────────────────────────────
-// MAIN
+// MAIN RUNNER
 // ─────────────────────────────────────────────
 export async function runMariaSync() {
   if (isSyncRunning) return;
@@ -305,6 +307,7 @@ export async function runMariaSync() {
     await syncTelemetry();
 
     log("info", "MariaSync completed");
+
   } catch (e) {
     log("error", "MariaSync failed", { error: e.message });
   } finally {
