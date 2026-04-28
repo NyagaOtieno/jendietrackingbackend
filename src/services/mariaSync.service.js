@@ -1,8 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import mariadbPkg from "mariadb";
-const mariadb = mariadbPkg;
+import * as mariadb from "mariadb";
 import { pgPool } from "../config/db.js";
 
 // ─────────────────────────────────────────────
@@ -28,7 +27,7 @@ export { isSyncRunning };
 // ─────────────────────────────────────────────
 // MARIA DB POOL (FIXED ESM SAFE)
 // ─────────────────────────────────────────────
-const pool = mariadb.createPool({
+export const pool = mariadb.createPool({
   host: process.env.MARIA_DB_HOST,
   user: process.env.MARIA_DB_USER,
   password: process.env.MARIA_DB_PASSWORD,
@@ -231,9 +230,17 @@ async function syncDevice(device, conn) {
 
   await pgPool.query(
     `
-    INSERT INTO telemetry
-    (device_id, event_id, latitude, longitude, speed_kph, heading, device_time)
-    VALUES ${placeholders.join(",")}
+    INSERT INTO telemetry (
+  device_id,
+  latitude,
+  longitude,
+  speed_kph,
+  heading,
+  device_time
+)
+VALUES ($1,$2,$3,$4,$5,$6)
+ON CONFLICT (device_id, device_time)
+DO NOTHING;}
     `,
     values
   );
