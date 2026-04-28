@@ -21,13 +21,16 @@ async function processBatch() {
   isRunning = true;
 
   try {
-    const { rows } = await pgPool.query(`
+    const { rows } = await pgPool.query(
+      `
       SELECT id, payload, retry_count
       FROM telemetry_ingestion_buffer
       WHERE status = 'PENDING'
       ORDER BY created_at ASC
       LIMIT $1
-    `, [BATCH_SIZE]);
+      `,
+      [BATCH_SIZE]
+    );
 
     if (!rows.length) return;
 
@@ -35,19 +38,21 @@ async function processBatch() {
 
     for (const row of rows) {
       try {
-        await publishTelemetryBatch(JSON.parse(row.payload));
+        const payload = JSON.parse(row.payload);
+        await publishTelemetryBatch(payload);
         successIds.push(row.id);
       } catch (err) {
         const retry = (row.retry_count || 0) + 1;
+        const status = retry >= MAX_RETRY ? "FAILED" : "PENDING";
 
         await pgPool.query(
           `
           UPDATE telemetry_ingestion_buffer
-          SET retry_count=$2,
-              status=$3
-          WHERE id=$1
+          SET retry_count = $2,
+              status = $3
+          WHERE id = $1
           `,
-          [row.id, retry, retry >= MAX_RETRY ? "FAILED" : "PENDING"]
+          [row.id, retry, status]
         );
       }
     }
@@ -56,8 +61,8 @@ async function processBatch() {
       await pgPool.query(
         `
         UPDATE telemetry_ingestion_buffer
-        SET status='PROCESSED',
-            processed_at=NOW()
+        SET status = 'PROCESSED',
+            processed_at = NOW()
         WHERE id = ANY($1)
         `,
         [successIds]
@@ -74,5 +79,6 @@ export function stopTelemetryBufferWorker() {
   if (intervalRef) {
     clearInterval(intervalRef);
     intervalRef = null;
+    console.log("🛑 Worker stopped");
   }
 }
