@@ -1,6 +1,7 @@
 import { pgPool } from "../config/db.js";
 import { publishTelemetryBatch } from "../queue/publisher.js";
-import { initMariaDB, runMariaSync } from "../services/mariaSync.service.js";
+import { runMariaSync } from "../services/mariaSync.service.js";
+import { initMariaDB } from "../config/initDb.js";
 
 await initMariaDB();
 
