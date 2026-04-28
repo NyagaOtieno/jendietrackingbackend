@@ -1,7 +1,13 @@
 import { pgPool } from "../config/db.js";
 import { publishTelemetryBatch } from "../queue/publisher.js";
+import { initMariaDB, runMariaSync } from "../services/mariaSync.service.js";
 
 await initMariaDB();
+
+setInterval(() => {
+  runMariaSync();
+}, 5 * 60 * 1000);
+
 
 let isRunning = false;
 let intervalRef = null;
