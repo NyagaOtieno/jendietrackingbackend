@@ -4,22 +4,28 @@ import * as geo from "../services/reverseGeocode.js";
 import { normalizeLimit } from "../utils/sql.js";
 import { isPrivilegedRole } from "../middleware/auth.js";
 
+// ─────────────────────────────────────────────
+// SAFE GEO LOOKUP (WITH FAILSAFE)
+// ─────────────────────────────────────────────
 async function safeLocationName(lat, lon) {
   try {
+    if (!lat || !lon) return "Unknown location";
     return (await geo.getLocationName(lat, lon)) || "Unknown location";
   } catch {
     return "Unknown location";
   }
 }
 
+// ─────────────────────────────────────────────
+// ROLE CHECK
+// ─────────────────────────────────────────────
 function isPrivileged(req) {
-  return isPrivilegedRole(req.user.role);
+  return isPrivilegedRole(req?.user?.role || "guest");
 }
 
-/**
- * 🔥 FIXED: removed INNER JOIN blockage
- * This was the reason your API returned: { data: [] }
- */
+// ─────────────────────────────────────────────
+// LATEST POSITIONS QUERY
+// ─────────────────────────────────────────────
 async function loadLatestFromDb(req) {
   const params = [];
 
@@ -44,21 +50,21 @@ async function loadLatestFromDb(req) {
     LEFT JOIN vehicles v ON v.id = d.vehicle_id
   `;
 
-  const isPriv = isPrivilegedRole(req?.user?.role || "guest");
-
-  if (!isPriv) {
-    const accId = parseInt(req?.user?.accountId || 0, 10);
-
-    // 🔥 CRITICAL FIX: move filter into JOIN-safe condition
+  if (!isPrivileged(req)) {
+    const accId = Number(req?.user?.accountId || 0);
     sql += ` WHERE (v.account_id = $1 OR v.account_id IS NULL) `;
-    params.push(isNaN(accId) ? 0 : accId);
+    params.push(accId);
   }
 
   sql += ` ORDER BY lp.received_at DESC LIMIT 1000`;
 
   const result = await query(sql, params);
-  return result.rows;
+  return result.rows || [];
 }
+
+// ─────────────────────────────────────────────
+// HISTORY QUERY
+// ─────────────────────────────────────────────
 async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
   const clauses = [`d.device_uid = $1`];
   const params = [deviceUid];
@@ -66,8 +72,7 @@ async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
 
   if (!isPrivileged(req)) {
     clauses.push(`v.account_id = $${index++}`);
-    const accId = parseInt(req.user.accountId, 10);
-    params.push(isNaN(accId) ? 0 : accId);
+    params.push(Number(req?.user?.accountId || 0));
   }
 
   if (from) {
@@ -105,34 +110,23 @@ async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
   `;
 
   const result = await query(sql, params);
-  return result.rows;
+  return result.rows || [];
 }
 
+// ─────────────────────────────────────────────
+// GET LATEST POSITIONS
+// ─────────────────────────────────────────────
 export async function getLatestPositions(req, res) {
   try {
     const rows = await loadLatestFromDb(req);
-
-    console.log("🔥 Latest positions count:", rows.length);
-
-    // safe debug sample
-    if (rows.length > 0) {
-      console.log("🔥 Sample position:", {
-        deviceUid: rows[0].deviceUid,
-        deviceId: rows[0].deviceId,
-        speedKph: rows[0].speedKph,
-        receivedAt: rows[0].receivedAt,
-      });
-    }
 
     return res.json({
       success: true,
       debugCount: rows.length,
       data: rows,
     });
-
   } catch (err) {
     console.error("getLatestPositions error:", err);
-
     return res.status(500).json({
       success: false,
       message: "Failed to load latest positions",
@@ -140,6 +134,9 @@ export async function getLatestPositions(req, res) {
   }
 }
 
+// ─────────────────────────────────────────────
+// GET HISTORY
+// ─────────────────────────────────────────────
 export async function getHistory(req, res) {
   try {
     const { deviceUid, from, to } = req.query;
@@ -154,12 +151,13 @@ export async function getHistory(req, res) {
 
     const rows = await loadHistoryFromDb(req, deviceUid, limit, from, to);
 
-    const enriched = await Promise.all(
-      rows.map(async (pos) => ({
+    const enriched = [];
+    for (const pos of rows) {
+      enriched.push({
         ...pos,
         locationName: await safeLocationName(pos.lat, pos.lon),
-      }))
-    );
+      });
+    }
 
     return res.json({ success: true, data: enriched });
   } catch (error) {
@@ -171,9 +169,19 @@ export async function getHistory(req, res) {
   }
 }
 
+// ─────────────────────────────────────────────
+// CREATE POSITION
+// ─────────────────────────────────────────────
 export async function createPosition(req, res) {
   try {
-    const { deviceUid, lat, lon, speedKph = 0, heading = 0, deviceTime = null } = req.body;
+    const {
+      deviceUid,
+      lat,
+      lon,
+      speedKph = 0,
+      heading = 0,
+      deviceTime = null,
+    } = req.body;
 
     if (!deviceUid || lat == null || lon == null) {
       return res.status(400).json({
@@ -188,9 +196,13 @@ export async function createPosition(req, res) {
       SELECT d.id, $2, $3, $4, $5, $6
       FROM devices d
       WHERE d.device_uid = $1
-      RETURNING id::text AS id, latitude AS lat, longitude AS lon,
-                speed_kph AS "speedKph", heading,
-                device_time AS "deviceTime", received_at AS "receivedAt"
+      RETURNING id::text AS id,
+                latitude AS lat,
+                longitude AS lon,
+                speed_kph AS "speedKph",
+                heading,
+                device_time AS "deviceTime",
+                received_at AS "receivedAt"
       `,
       [deviceUid, lat, lon, speedKph, heading, deviceTime]
     );
@@ -215,15 +227,21 @@ export async function createPosition(req, res) {
   }
 }
 
+// ─────────────────────────────────────────────
+// GET POSITION BY ID
+// ─────────────────────────────────────────────
 export async function getPositionById(req, res) {
   try {
     const { id } = req.params;
 
     let sql = `
-      SELECT t.id::text AS id, d.device_uid AS "deviceUid",
-             t.latitude AS lat, t.longitude AS lon,
+      SELECT t.id::text AS id,
+             d.device_uid AS "deviceUid",
+             t.latitude AS lat,
+             t.longitude AS lon,
              COALESCE(t.speed_kph,0) AS "speedKph",
-             t.heading, t.device_time AS "deviceTime",
+             t.heading,
+             t.device_time AS "deviceTime",
              t.received_at AS "receivedAt",
              v.id AS "vehicleId",
              v.plate_number AS "plateNumber",
@@ -239,8 +257,7 @@ export async function getPositionById(req, res) {
 
     if (!isPrivileged(req)) {
       sql += ` AND v.account_id = $2 `;
-      const accId = parseInt(req.user.accountId, 10);
-      params.push(isNaN(accId) ? 0 : accId);
+      params.push(Number(req?.user?.accountId || 0));
     }
 
     const result = await query(sql, params);
@@ -270,12 +287,18 @@ export async function getPositionById(req, res) {
   }
 }
 
+// ─────────────────────────────────────────────
+// UPDATE POSITION
+// ─────────────────────────────────────────────
 export async function updatePosition(req, res) {
   try {
     const { id } = req.params;
     const { lat, lon, speedKph, heading, deviceTime } = req.body;
 
-    const existing = await query(`SELECT * FROM telemetry WHERE id = $1`, [id]);
+    const existing = await query(
+      `SELECT * FROM telemetry WHERE id = $1`,
+      [id]
+    );
 
     if (!existing.rows.length) {
       return res.status(404).json({
@@ -295,8 +318,11 @@ export async function updatePosition(req, res) {
           heading = $4,
           device_time = $5
       WHERE id = $6
-      RETURNING id::text AS id, latitude AS lat, longitude AS lon,
-                speed_kph AS "speedKph", heading,
+      RETURNING id::text AS id,
+                latitude AS lat,
+                longitude AS lon,
+                speed_kph AS "speedKph",
+                heading,
                 device_time AS "deviceTime",
                 received_at AS "receivedAt"
       `,
@@ -320,6 +346,9 @@ export async function updatePosition(req, res) {
   }
 }
 
+// ─────────────────────────────────────────────
+// DELETE POSITION
+// ─────────────────────────────────────────────
 export async function deletePosition(req, res) {
   try {
     const { id } = req.params;
