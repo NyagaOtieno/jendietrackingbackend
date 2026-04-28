@@ -1,5 +1,5 @@
-import { pgPool } from '../config/db.js';
-import { publishTelemetryBatch } from '../queue/publisher.js';
+import { pgPool } from "../config/db.js";
+import { publishTelemetryBatch } from "../queue/publisher.js";
 
 let isRunning = false;
 let intervalRef = null;
@@ -9,105 +9,71 @@ const INTERVAL = 5000;
 const MAX_RETRY = 5;
 
 export function startTelemetryBufferWorker() {
-  console.log('🚀 Telemetry Buffer Worker started');
+  console.log("🚀 Telemetry Worker started");
 
-  // prevent double start (PM2 safety)
-  if (intervalRef) {
-    console.log('⚠️ Worker already running');
-    return;
-  }
+  if (intervalRef) return;
 
   intervalRef = setInterval(processBatch, INTERVAL);
 }
 
-/**
- * =========================
- * MAIN PROCESS LOOP
- * =========================
- */
 async function processBatch() {
   if (isRunning) return;
 
   isRunning = true;
 
   try {
-    const { rows } = await pgPool.query(`
+    const { rows } = await pgPool.query(
+      `
       SELECT id, payload, retry_count
       FROM telemetry_ingestion_buffer
       WHERE status = 'PENDING'
       ORDER BY created_at ASC
       LIMIT $1
-    `, [BATCH_SIZE]);
+      `,
+      [BATCH_SIZE]
+    );
 
-    if (!rows.length) {
-      isRunning = false;
-      return;
-    }
+    if (!rows.length) return;
 
-    console.log(`📦 Processing ${rows.length} telemetry records`);
+    const success = [];
 
-    const successIds = [];
-
-    for (const row of rows) {
+    for (const r of rows) {
       try {
-        const payload = JSON.parse(row.payload);
-
-        await publishTelemetryBatch(payload);
-
-        successIds.push(row.id);
-
+        await publishTelemetryBatch(JSON.parse(r.payload));
+        success.push(r.id);
       } catch (err) {
-        const retry = (row.retry_count || 0) + 1;
-        const status = retry >= MAX_RETRY ? 'FAILED' : 'PENDING';
+        const retry = (r.retry_count || 0) + 1;
 
-        await pgPool.query(`
+        await pgPool.query(
+          `
           UPDATE telemetry_ingestion_buffer
-          SET retry_count = $2,
-              status = $3
-          WHERE id = $1
-        `, [row.id, retry, status]);
-
-        console.error(`❌ Failed id=${row.id}:`, err.message);
+          SET retry_count=$2,
+              status = CASE WHEN $2 >= $3 THEN 'FAILED' ELSE 'PENDING' END
+          WHERE id=$1
+          `,
+          [r.id, retry, MAX_RETRY]
+        );
       }
     }
 
-    // bulk success update (FAST)
-    if (successIds.length > 0) {
-      await pgPool.query(`
+    if (success.length) {
+      await pgPool.query(
+        `
         UPDATE telemetry_ingestion_buffer
-        SET status = 'PROCESSED',
-            processed_at = NOW()
+        SET status='PROCESSED', processed_at=NOW()
         WHERE id = ANY($1)
-      `, [successIds]);
+        `,
+        [success]
+      );
     }
-
-  } catch (err) {
-    console.error('🔥 Worker crash cycle:', err.message);
+  } catch (e) {
+    console.error("Worker error:", e.message);
   } finally {
     isRunning = false;
   }
 }
-let isRunning = false;
 
-export async function runSync() {
-  if (isRunning) return;
-  isRunning = true;
-
-  try {
-    // sync logic
-  } finally {
-    isRunning = false;
-  }
-}
-/**
- * =========================
- * GRACEFUL SHUTDOWN (IMPORTANT)
- * =========================
- */
 export function stopTelemetryBufferWorker() {
-  if (intervalRef) {
-    clearInterval(intervalRef);
-    intervalRef = null;
-    console.log('🛑 Telemetry Worker stopped');
-  }
+  if (intervalRef) clearInterval(intervalRef);
+  intervalRef = null;
 }
