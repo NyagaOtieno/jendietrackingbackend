@@ -173,12 +173,11 @@ export function startMariaSyncJob() {
   const schedule = process.env.SYNC_CRON || '*/5 * * * *';
   console.log(`📦 Maria sync scheduled: ${schedule}`);
 
-  cron.schedule(schedule, async () => {
+  // ✅ 5-second continuous interval (replaces cron)
+  const runSafe = async () => {
     if (isRunning || global.__MARIASYNC_RUNNING__) return;
-
     isRunning = true;
     global.__MARIASYNC_RUNNING__ = true;
-
     try {
       await runMariaSync();
     } catch (err) {
@@ -187,7 +186,9 @@ export function startMariaSyncJob() {
       isRunning = false;
       global.__MARIASYNC_RUNNING__ = false;
     }
-  });
+  };
+  runSafe();
+  setInterval(runSafe, 5000);
 }
 
 /**
