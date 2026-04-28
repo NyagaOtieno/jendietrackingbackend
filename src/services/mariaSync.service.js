@@ -1,7 +1,8 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import * as mariadb from "mariadb";
+import mariadbPkg from "mariadb";
+const mariadb = mariadbPkg;
 import { pgPool } from "../config/db.js";
 
 // ─────────────────────────────────────────────
