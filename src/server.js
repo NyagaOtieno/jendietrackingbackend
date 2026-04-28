@@ -32,7 +32,9 @@ import vehiclesRoutes from './routes/vehicles.routes.js';
 import syncRoutes from './routes/sync.routes.js';
 import telemetryRoutes from './routes/telemetry.routes.js';
 import usersRoutes from './routes/users.routes.js';
+import { initMariaDB } from "./config/initDb.js";
 
+await initMariaDB();
 /**
  * =========================
  * APP + SERVER

@@ -9,8 +9,11 @@ export const mariaPool = mysql.createPool({
   user: process.env.MARIA_USER,
   password: process.env.MARIA_PASSWORD,
   database: process.env.MARIA_DATABASE,
+
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+
   enableKeepAlive: true,
+  keepAliveInitialDelay: 0,
 });

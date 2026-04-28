@@ -1,6 +1,8 @@
 import { pgPool } from "../config/db.js";
 import { publishTelemetryBatch } from "../queue/publisher.js";
 
+await initMariaDB();
+
 let isRunning = false;
 let intervalRef = null;
 
