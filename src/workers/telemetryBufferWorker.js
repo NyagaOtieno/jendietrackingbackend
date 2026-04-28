@@ -8,7 +8,6 @@ setInterval(() => {
   runMariaSync();
 }, 5 * 60 * 1000);
 
-
 let isRunning = false;
 let intervalRef = null;
 

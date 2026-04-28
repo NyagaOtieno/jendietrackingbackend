@@ -267,7 +267,15 @@ export async function syncTelemetry() {
     conn?.release();
   }
 }
-
+export async function initMariaDB() {
+  try {
+    const conn = await mariaPool.getConnection();
+    console.log("MariaDB/MySQL connected");
+    conn.release();
+  } catch (err) {
+    console.error("DB connection failed", err);
+  }
+}
 // ─────────────────────────────────────────────
 // MAIN
 // ─────────────────────────────────────────────
