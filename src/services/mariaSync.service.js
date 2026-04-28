@@ -1,24 +1,26 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-// ✅ FIX: ESM-safe mariadb import
-import * as mariadb from "mariadb";
-
+import mariadbImport from "mariadb";
 import { pgPool } from "../config/db.js";
 import { publishAlert } from "../queue/publisher.js";
+
+// ─────────────────────────────────────────────
+// FIX: support both ESM/CJS export styles
+// ─────────────────────────────────────────────
+const mariadb = mariadbImport?.default || mariadbImport;
+const createPool = mariadb.createPool;
 
 // ─────────────────────────────────────────────
 // LOGGER
 // ─────────────────────────────────────────────
 const log = (level, msg, meta = {}) => {
-  console.log(
-    JSON.stringify({
-      time: new Date().toISOString(),
-      level,
-      msg,
-      ...meta,
-    })
-  );
+  console.log(JSON.stringify({
+    time: new Date().toISOString(),
+    level,
+    msg,
+    ...meta
+  }));
 };
 
 // ─────────────────────────────────────────────
@@ -28,9 +30,9 @@ let isSyncRunning = false;
 export { isSyncRunning };
 
 // ─────────────────────────────────────────────
-// MARIA DB POOL (FIXED IMPORT USAGE)
+// MARIA DB POOL
 // ─────────────────────────────────────────────
-const mariaPool = mariadb.createPool({
+const mariaPool = createPool({
   host: process.env.MARIA_DB_HOST,
   port: Number(process.env.MARIA_DB_PORT || 3306),
   user: process.env.MARIA_DB_USER,
@@ -111,7 +113,7 @@ export async function syncVehicles() {
       if (r.device_uid) {
         await pgPool.query(
           `INSERT INTO devices (device_uid, serial, positionid)
-           VALUES ($1,$2,0)
+           VALUES ($1,$2,COALESCE((SELECT positionid FROM devices WHERE device_uid=$1),0))
            ON CONFLICT (device_uid) DO NOTHING`,
           [String(r.device_uid), serial]
         );
@@ -121,6 +123,7 @@ export async function syncVehicles() {
     }
 
     log("info", "Vehicle sync complete", { vehicles });
+
   } catch (e) {
     log("error", "Vehicle sync failed", { error: e.message });
   } finally {
@@ -129,7 +132,7 @@ export async function syncVehicles() {
 }
 
 // ─────────────────────────────────────────────
-// DEVICE SYNC (UNCHANGED LOGIC, SAFE)
+// DEVICE SYNC
 // ─────────────────────────────────────────────
 async function syncDevice(device, conn) {
   const deviceUid = device.device_uid;
@@ -178,8 +181,7 @@ async function syncDevice(device, conn) {
     const lat = Number(r.latitude);
     const lon = Number(r.longitude);
 
-    if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat === 0 || lon === 0)
-      continue;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat === 0 || lon === 0) continue;
 
     const dt = r.devicetime ? new Date(r.devicetime) : new Date(r.servertime);
 
@@ -190,7 +192,7 @@ async function syncDevice(device, conn) {
       lon,
       speed: Number(r.speed) || 0,
       heading: Number(r.course) || 0,
-      dt,
+      dt
     });
   }
 
@@ -198,17 +200,9 @@ async function syncDevice(device, conn) {
 
   const values = [];
   const placeholders = valid.map((v, i) => {
-    const base = i * 7;
-    values.push(
-      v.pgDeviceId,
-      v.id,
-      v.lat,
-      v.lon,
-      v.speed,
-      v.heading,
-      v.dt
-    );
-    return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7})`;
+    const b = i * 7;
+    values.push(v.pgDeviceId, v.id, v.lat, v.lon, v.speed, v.heading, v.dt);
+    return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},$${b+7})`;
   });
 
   await pgPool.query(
@@ -231,7 +225,6 @@ async function syncDevice(device, conn) {
        speed_kph=EXCLUDED.speed_kph,
        heading=EXCLUDED.heading,
        device_time=EXCLUDED.device_time,
-       received_at=NOW(),
        updated_at=NOW()`,
     [
       latest.pgDeviceId,
@@ -239,7 +232,7 @@ async function syncDevice(device, conn) {
       latest.lon,
       latest.speed,
       latest.heading,
-      latest.dt,
+      latest.dt
     ]
   );
 
@@ -280,6 +273,7 @@ export async function syncTelemetry() {
     }
 
     log("info", "Telemetry sync complete", { total, processed });
+
   } catch (e) {
     log("error", "Telemetry sync failed", { error: e.message });
   } finally {
@@ -288,7 +282,7 @@ export async function syncTelemetry() {
 }
 
 // ─────────────────────────────────────────────
-// MAIN
+// RUNNER
 // ─────────────────────────────────────────────
 export async function runMariaSync() {
   if (isSyncRunning) return;
@@ -305,6 +299,7 @@ export async function runMariaSync() {
     await syncTelemetry();
 
     log("info", "MariaSync completed");
+
   } catch (e) {
     log("error", "MariaSync failed", { error: e.message });
   } finally {
