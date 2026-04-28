@@ -1,11 +1,5 @@
-import { mariaPool } from "./mariadb.pool.js";
+import { initMariaDB } from "../services/mariaSync.service.js";
 
-export async function initMariaDB() {
-  try {
-    const conn = await mariaPool.getConnection();
-    console.log("✅ MariaDB/MySQL connected");
-    conn.release();
-  } catch (err) {
-    console.error("❌ MariaDB/MySQL connection failed", err);
-  }
+export async function initDb() {
+  await initMariaDB();
 }
