@@ -39,7 +39,8 @@ export async function getVehicles(req, res) {
     // =========================
     // PAGINATION INPUTS
     // =========================
-    const limit = Math.min(parseInt(req.query.limit || "200"), 500);
+    const limit = parseInt(req.query.limit || "100000");
+    const safeLimit = Number.isFinite(limit) ? limit : 100000;
     const offset = Math.max(parseInt(req.query.offset || "0"), 0);
 
     // =========================
@@ -74,7 +75,7 @@ export async function getVehicles(req, res) {
       }
 
       sql += ` WHERE v.account_id = $1 `;
-      params.push(accountId);
+      params.push(safeLimit, offset);
     }
 
     // =========================
