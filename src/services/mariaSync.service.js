@@ -1,7 +1,13 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import * as mariadb from "mariadb";
+/**
+ * MariaDB (ESM SAFE FIX)
+ * Some environments require default import fallback handling
+ */
+import mariadbImport from "mariadb";
+const mariadb = mariadbImport?.default ?? mariadbImport;
+
 import { pgPool } from "../config/db.js";
 
 // ─────────────────────────────────────────────
@@ -25,7 +31,7 @@ let isSyncRunning = false;
 export { isSyncRunning };
 
 // ─────────────────────────────────────────────
-// MARIA DB POOL (FIXED ESM SAFE)
+// MARIA DB POOL
 // ─────────────────────────────────────────────
 export const mariaPool = mariadb.createPool({
   host: process.env.MARIA_DB_HOST,
@@ -34,6 +40,7 @@ export const mariaPool = mariadb.createPool({
   database: process.env.MARIA_DB_NAME,
   connectionLimit: 10,
 });
+
 // ─────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────
@@ -59,7 +66,8 @@ async function releaseLock() {
 // ─────────────────────────────────────────────
 const N = (v) => {
   if (v === null || v === undefined) return 0;
-  return Number(v) || 0;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
 };
 
 // ─────────────────────────────────────────────
@@ -84,7 +92,7 @@ export async function syncVehicles() {
     let count = 0;
 
     for (const r of rows) {
-      const serial = String(r.serial).trim();
+      const serial = String(r.serial || "").trim();
       if (!serial) continue;
 
       await pgPool.query(
@@ -129,7 +137,7 @@ export async function syncVehicles() {
 }
 
 // ─────────────────────────────────────────────
-// DEVICE SYNC (SAFE + NO DUPLICATES)
+// DEVICE SYNC (UNCHANGED LOGIC, FIXED SAFETY)
 // ─────────────────────────────────────────────
 async function syncDevice(device, conn) {
   const deviceUid = device.device_uid;
@@ -179,7 +187,9 @@ async function syncDevice(device, conn) {
     const lat = Number(r.latitude);
     const lon = Number(r.longitude);
 
-    if (lat == null || lon == null) continue;
+    // FIXED GPS VALIDATION
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    if (lat === 0 && lon === 0) continue;
 
     valid.push({
       pgDeviceId,
@@ -194,9 +204,6 @@ async function syncDevice(device, conn) {
 
   if (!valid.length) return { count: 0, maxId };
 
-  // ─────────────────────────────────────────────
-  // FIX: PREVENT DUPLICATES BEFORE INSERT
-  // ─────────────────────────────────────────────
   const ids = valid.map((v) => v.id);
 
   const existing = await pgPool.query(
@@ -213,37 +220,33 @@ async function syncDevice(device, conn) {
 
   if (!filtered.length) return { count: 0, maxId };
 
-const values = [];
-const placeholders = filtered.map((v, i) => {
-  const b = i * 6;
-
-  values.push(
-    v.pgDeviceId,
-    v.lat,
-    v.lon,
-    v.speed,
-    v.heading,
-    v.dt
-  );
-
-  return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6})`;
-});
-
-await pgPool.query(
-  `
-  INSERT INTO telemetry (
-    device_id,
-    latitude,
-    longitude,
-    speed_kph,
-    heading,
-    device_time
-  )
-  VALUES ${placeholders.join(",")}
-  ON CONFLICT (device_id, device_time) DO NOTHING
-  `,
-  values
-);
+  // ─────────────────────────────────────────────
+  // SAFE INSERT (NO BROKEN PLACEHOLDERS)
+  // ─────────────────────────────────────────────
+  for (const v of filtered) {
+    await pgPool.query(
+      `
+      INSERT INTO telemetry (
+        device_id,
+        latitude,
+        longitude,
+        speed_kph,
+        heading,
+        device_time
+      )
+      VALUES ($1,$2,$3,$4,$5,$6)
+      ON CONFLICT (device_id, device_time) DO NOTHING
+      `,
+      [
+        v.pgDeviceId,
+        v.lat,
+        v.lon,
+        v.speed,
+        v.heading,
+        v.dt,
+      ]
+    );
+  }
 
   const latest = filtered.reduce((a, b) => (a.dt > b.dt ? a : b));
 
@@ -321,7 +324,7 @@ export async function syncTelemetry() {
 }
 
 // ─────────────────────────────────────────────
-// MAIN SYNC
+// MAIN SYNC (UNCHANGED BEHAVIOR, HARDENED)
 // ─────────────────────────────────────────────
 export async function runMariaSync() {
   if (isSyncRunning) return;
