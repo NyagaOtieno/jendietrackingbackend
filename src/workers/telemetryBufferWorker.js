@@ -87,7 +87,18 @@ async function processBatch() {
     isRunning = false;
   }
 }
+let isRunning = false;
 
+export async function runSync() {
+  if (isRunning) return;
+  isRunning = true;
+
+  try {
+    // sync logic
+  } finally {
+    isRunning = false;
+  }
+}
 /**
  * =========================
  * GRACEFUL SHUTDOWN (IMPORTANT)
