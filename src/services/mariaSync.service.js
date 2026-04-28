@@ -1,8 +1,9 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import { createPool } from "mariadb";   // ✅ FIXED
+import { createPool } from "mariadb";
 import { pgPool } from "../config/db.js";
+import { publishAlert } from "../queue/publisher.js";
 
 // ─────────────────────────────────────────────
 // LOGGER
@@ -25,7 +26,7 @@ export { isSyncRunning };
 // ─────────────────────────────────────────────
 // MARIA DB POOL
 // ─────────────────────────────────────────────
-const mariaPool = mariadb.createPool({
+const mariaPool = createPool({
   host: process.env.MARIA_DB_HOST,
   port: Number(process.env.MARIA_DB_PORT || 3306),
   user: process.env.MARIA_DB_USER,
@@ -33,6 +34,7 @@ const mariaPool = mariadb.createPool({
   database: process.env.MARIA_DB_NAME || "uradi",
   connectionLimit: 5,
   connectTimeout: 15000,
+  acquireTimeout: 20000,
 });
 
 // ─────────────────────────────────────────────
