@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import mariadb from "mariadb";
+import { createPool } from "mariadb";   // ✅ FIXED
 import { pgPool } from "../config/db.js";
 
 // ─────────────────────────────────────────────
