@@ -9,7 +9,7 @@ const INTERVAL = 5000;
 const MAX_RETRY = 5;
 
 export function startTelemetryBufferWorker() {
-  console.log("🚀 Telemetry Worker started");
+  console.log("🚀 Telemetry Buffer Worker started");
 
   if (intervalRef) return;
 
@@ -18,52 +18,49 @@ export function startTelemetryBufferWorker() {
 
 async function processBatch() {
   if (isRunning) return;
-
   isRunning = true;
 
   try {
-    const { rows } = await pgPool.query(
-      `
+    const { rows } = await pgPool.query(`
       SELECT id, payload, retry_count
       FROM telemetry_ingestion_buffer
       WHERE status = 'PENDING'
       ORDER BY created_at ASC
       LIMIT $1
-      `,
-      [BATCH_SIZE]
-    );
+    `, [BATCH_SIZE]);
 
     if (!rows.length) return;
 
-    const success = [];
+    const successIds = [];
 
-    for (const r of rows) {
+    for (const row of rows) {
       try {
-        await publishTelemetryBatch(JSON.parse(r.payload));
-        success.push(r.id);
+        await publishTelemetryBatch(JSON.parse(row.payload));
+        successIds.push(row.id);
       } catch (err) {
-        const retry = (r.retry_count || 0) + 1;
+        const retry = (row.retry_count || 0) + 1;
 
         await pgPool.query(
           `
           UPDATE telemetry_ingestion_buffer
           SET retry_count=$2,
-              status = CASE WHEN $2 >= $3 THEN 'FAILED' ELSE 'PENDING' END
+              status=$3
           WHERE id=$1
           `,
-          [r.id, retry, MAX_RETRY]
+          [row.id, retry, retry >= MAX_RETRY ? "FAILED" : "PENDING"]
         );
       }
     }
 
-    if (success.length) {
+    if (successIds.length) {
       await pgPool.query(
         `
         UPDATE telemetry_ingestion_buffer
-        SET status='PROCESSED', processed_at=NOW()
+        SET status='PROCESSED',
+            processed_at=NOW()
         WHERE id = ANY($1)
         `,
-        [success]
+        [successIds]
       );
     }
   } catch (e) {
@@ -74,6 +71,8 @@ async function processBatch() {
 }
 
 export function stopTelemetryBufferWorker() {
-  if (intervalRef) clearInterval(intervalRef);
-  intervalRef = null;
+  if (intervalRef) {
+    clearInterval(intervalRef);
+    intervalRef = null;
+  }
 }

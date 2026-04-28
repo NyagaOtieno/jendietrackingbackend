@@ -3,12 +3,12 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+// single shared pool (PRODUCTION SAFE)
 export const mariaPool = mariadb.createPool({
-  host: process.env.MARIA_HOST,
-  port: Number(process.env.MARIA_PORT || 3306),
-  user: process.env.MARIA_USER,
-  password: process.env.MARIA_PASSWORD,
-  database: process.env.MARIA_DATABASE,
+  host: process.env.MARIA_DB_HOST,
+  user: process.env.MARIA_DB_USER,
+  password: process.env.MARIA_DB_PASSWORD,
+  database: process.env.MARIA_DB_NAME,
   connectionLimit: 10,
-  connectTimeout: 15000,
+  multipleStatements: false,
 });

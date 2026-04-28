@@ -1,13 +1,37 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import { mariaPool } from "../config/mariadb.js";
 import { pgPool } from "../config/db.js";
 
-let isSyncRunning = false;
-
-const log = (level, msg, meta = {}) =>
-  console.log(JSON.stringify({ time: new Date().toISOString(), level, msg, ...meta }));
+// ─────────────────────────────
+// LOGGER
+// ─────────────────────────────
+const log = (level, msg, meta = {}) => {
+  console.log(
+    JSON.stringify({
+      time: new Date().toISOString(),
+      level,
+      msg,
+      ...meta,
+    })
+  );
+};
 
 // ─────────────────────────────
-// POSTGRES LOCK
+// LOCKING STATE
+// ─────────────────────────────
+let isSyncRunning = false;
+export { isSyncRunning };
+
+// ─────────────────────────────
+// CONFIG
+// ─────────────────────────────
+const DEVICE_BATCH = Number(process.env.DEVICE_BATCH || 200);
+const EVENTS_BATCH = Number(process.env.EVENTS_BATCH || 200);
+
+// ─────────────────────────────
+// LOCK (POSTGRES SAFE)
 // ─────────────────────────────
 async function acquireLock() {
   const res = await pgPool.query(
@@ -24,9 +48,12 @@ async function releaseLock() {
 // VEHICLE SYNC
 // ─────────────────────────────
 export async function syncVehicles() {
-  const conn = await mariaPool.getConnection();
+  let conn;
 
   try {
+    conn = await mariaPool.getConnection();
+    log("info", "MariaDB connected for vehicle sync");
+
     const rows = await conn.query(`
       SELECT r.serial, r.reg_no, r.vmodel, r.pstatus,
              d.uniqueid AS device_uid
@@ -52,7 +79,13 @@ export async function syncVehicles() {
           model = EXCLUDED.model,
           status = EXCLUDED.status
         `,
-        [serial, r.reg_no || serial, `Unit ${serial}`, r.vmodel || "", r.pstatus || "inactive"]
+        [
+          serial,
+          r.reg_no || serial,
+          `Unit ${serial}`,
+          r.vmodel || "",
+          r.pstatus || "inactive",
+        ]
       );
 
       count++;
@@ -62,137 +95,104 @@ export async function syncVehicles() {
   } catch (e) {
     log("error", "Vehicle sync failed", { error: e.message });
   } finally {
-    conn.release();
+    conn?.release();
   }
-}
-
-// ─────────────────────────────
-// DEVICE TELEMETRY SYNC
-// ─────────────────────────────
-async function syncDevice(device, conn) {
-  const deviceUid = device.device_uid;
-  const lastId = Number(device.positionid || 0);
-
-  if (!deviceUid) return { count: 0, maxId: lastId };
-
-  const dev = await conn.query(
-    "SELECT id FROM device WHERE uniqueid=? LIMIT 1",
-    [deviceUid]
-  );
-
-  if (!dev.length) return { count: 0, maxId: lastId };
-
-  const mariaDeviceId = Number(dev[0].id);
-
-  const rows = await conn.query(
-    `
-    SELECT id, devicetime, latitude, longitude, speed, course
-    FROM eventData
-    WHERE deviceid=?
-      AND id > ?
-    ORDER BY id ASC
-    LIMIT 200
-    `,
-    [mariaDeviceId, lastId]
-  );
-
-  if (!rows.length) return { count: 0, maxId: lastId };
-
-  let maxId = lastId;
-  const clean = [];
-
-  for (const r of rows) {
-    const id = Number(r.id);
-    if (id > maxId) maxId = id;
-
-    const lat = Number(r.latitude);
-    const lon = Number(r.longitude);
-
-    if (!lat || !lon) continue;
-
-    clean.push({
-      id,
-      lat,
-      lon,
-      speed: Number(r.speed) || 0,
-      heading: Number(r.course) || 0,
-      dt: new Date(r.devicetime),
-    });
-  }
-
-  if (!clean.length) return { count: 0, maxId };
-
-  // UPSERT SAFE INSERT (FIXED)
-  for (const t of clean) {
-    await pgPool.query(
-      `
-      INSERT INTO telemetry (
-        device_id,
-        latitude,
-        longitude,
-        speed_kph,
-        heading,
-        device_time
-      )
-      VALUES ($1,$2,$3,$4,$5,$6)
-      ON CONFLICT (device_id, device_time)
-      DO NOTHING
-      `,
-      [
-        device.id,
-        t.lat,
-        t.lon,
-        t.speed,
-        t.heading,
-        t.dt,
-      ]
-    );
-  }
-
-  return { count: clean.length, maxId };
 }
 
 // ─────────────────────────────
 // TELEMETRY SYNC
 // ─────────────────────────────
 export async function syncTelemetry() {
-  const conn = await mariaPool.getConnection();
+  let conn;
 
   try {
+    conn = await mariaPool.getConnection();
+
     const { rows: devices } = await pgPool.query(
-      "SELECT id, device_uid, positionid FROM devices"
+      "SELECT device_uid, positionid FROM devices"
     );
 
     let total = 0;
-    let processed = 0;
 
-    for (const d of devices) {
-      const r = await syncDevice(d, conn);
+    for (const d of devices.slice(0, DEVICE_BATCH)) {
+      const mariaDev = await conn.query(
+        "SELECT id FROM device WHERE uniqueid=? LIMIT 1",
+        [d.device_uid]
+      );
 
-      total += r.count;
+      if (!mariaDev.length) continue;
+
+      const mariaDeviceId = mariaDev[0].id;
+
+      const rows = await conn.query(
+        `
+        SELECT id, devicetime, latitude, longitude, speed, course
+        FROM eventData
+        WHERE deviceid=? AND id > ?
+        ORDER BY id ASC
+        LIMIT ?
+        `,
+        [mariaDeviceId, d.positionid || 0, EVENTS_BATCH]
+      );
+
+      if (!rows.length) continue;
+
+      const values = [];
+      const ids = [];
+
+      for (const r of rows) {
+        const lat = Number(r.latitude);
+        const lon = Number(r.longitude);
+        if (!lat || !lon) continue;
+
+        values.push([
+          d.device_uid,
+          lat,
+          lon,
+          Number(r.speed) || 0,
+          Number(r.course) || 0,
+          new Date(r.devicetime),
+        ]);
+
+        ids.push(r.id);
+      }
+
+      if (!values.length) continue;
+
+      for (const v of values) {
+        await pgPool.query(
+          `
+          INSERT INTO telemetry
+          (device_uid, latitude, longitude, speed_kph, heading, device_time)
+          VALUES ($1,$2,$3,$4,$5,$6)
+          ON CONFLICT DO NOTHING
+          `,
+          v
+        );
+      }
 
       await pgPool.query(
         `
         UPDATE devices
         SET positionid = GREATEST(positionid,$1)
-        WHERE id=$2
+        WHERE device_uid=$2
         `,
-        [r.maxId, d.id]
+        [Math.max(...ids), d.device_uid]
       );
 
-      processed++;
+      total += values.length;
     }
 
-    log("info", "Telemetry sync complete", { total, processed });
+    log("info", "Telemetry sync complete", { total });
   } catch (e) {
     log("error", "Telemetry sync failed", { error: e.message });
   } finally {
-    conn.release();
+    conn?.release();
   }
 }
 
 // ─────────────────────────────
-// MAIN SYNC ENGINE
+// MAIN SYNC
 // ─────────────────────────────
 export async function runMariaSync() {
   if (isSyncRunning) return;
