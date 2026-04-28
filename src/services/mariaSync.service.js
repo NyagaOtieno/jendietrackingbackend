@@ -5,7 +5,7 @@ dotenv.config();
  * MariaDB (ESM SAFE FIX)
  * Some environments require default import fallback handling
  */
-import mariadbImport from "mariadb";
+import * as mariadb from "mariadb";
 const mariadb = mariadbImport?.default ?? mariadbImport;
 
 import { pgPool } from "../config/db.js";
