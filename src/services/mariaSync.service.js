@@ -77,7 +77,13 @@ export async function syncVehicles() {
   let conn;
 
   try {
-    conn = await mariaPool.getConnection();
+   const conn = await mariaPool.getConnection();
+
+try {
+  const [rows] = await conn.query("SELECT ...");
+} finally {
+  conn.release();
+}
     log("info", "MariaDB connected for vehicle sync");
 
     const rows = await conn.query(`
