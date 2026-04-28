@@ -25,8 +25,8 @@ async function loadLatestFromDb(req) {
 
   let sql = `
     SELECT
-      lp.device_id AS "deviceId",
       d.device_uid AS "deviceUid",
+      d.id AS "deviceId",
       lp.latitude AS lat,
       lp.longitude AS lon,
       COALESCE(lp.speed_kph, 0) AS "speedKph",
@@ -40,7 +40,7 @@ async function loadLatestFromDb(req) {
       COALESCE(v.account_id, 0) AS "accountId"
 
     FROM latest_positions lp
-    LEFT JOIN devices d ON d.id = lp.device_id
+    JOIN devices d ON d.id = lp.device_id
     LEFT JOIN vehicles v ON v.id = d.vehicle_id
   `;
 
@@ -328,3 +328,4 @@ export async function deletePosition(req, res) {
     });
   }
 }
+console.log("LATEST SAMPLE:", rows[0]);
