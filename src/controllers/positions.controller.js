@@ -109,15 +109,35 @@ async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
 }
 
 export async function getLatestPositions(req, res) {
-  const rows = await loadLatestFromDb(req);
+  try {
+    const rows = await loadLatestFromDb(req);
 
-  console.log("🔥 FINAL ROWS:", rows.length);
+    console.log("🔥 Latest positions count:", rows.length);
 
-  return res.json({
-    success: true,
-    debugCount: rows.length,
-    data: rows
-  });
+    // safe debug sample
+    if (rows.length > 0) {
+      console.log("🔥 Sample position:", {
+        deviceUid: rows[0].deviceUid,
+        deviceId: rows[0].deviceId,
+        speedKph: rows[0].speedKph,
+        receivedAt: rows[0].receivedAt,
+      });
+    }
+
+    return res.json({
+      success: true,
+      debugCount: rows.length,
+      data: rows,
+    });
+
+  } catch (err) {
+    console.error("getLatestPositions error:", err);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load latest positions",
+    });
+  }
 }
 
 export async function getHistory(req, res) {
@@ -328,4 +348,3 @@ export async function deletePosition(req, res) {
     });
   }
 }
-console.log("LATEST SAMPLE:", rows[0]);
