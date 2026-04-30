@@ -3,7 +3,7 @@ dotenv.config();
 
 import mariadb from "mariadb";
 import { pgPool } from "../config/db.js";
-import { redis } from "../config/redisClient.js";
+import { redis } from "../config/redis.js";
 
 /**
  * =========================
@@ -54,7 +54,7 @@ const EVENTS_BATCH = Number(process.env.EVENTS_BATCH || 200);
 
 /**
  * =========================
- * LOCK (HARDENED)
+ * LOCK
  * =========================
  */
 async function acquireLock() {
@@ -99,9 +99,7 @@ async function loadDeviceMap() {
     "SELECT id, device_uid FROM devices"
   );
 
-  deviceMapCache = new Map(
-    (rows || []).map(r => [r.device_uid, r.id])
-  );
+  deviceMapCache = new Map((rows || []).map(r => [r.device_uid, r.id]));
 }
 
 /**
@@ -172,6 +170,23 @@ export async function syncVehicles() {
 
 /**
  * =========================
+ * REDIS CACHE (STANDARDIZED STYLE)
+ * =========================
+ */
+async function cacheLatestPosition(deviceId, data) {
+  await redis.hset(`vehicle:${deviceId}:latest`, {
+    lat: String(data.lat),
+    lng: String(data.lon),
+    speed: String(data.speed),
+    heading: String(data.heading),
+    timestamp: String(data.time),
+  });
+
+  await redis.expire(`vehicle:${deviceId}:latest`, 60);
+}
+
+/**
+ * =========================
  * DEVICE SYNC
  * =========================
  */
@@ -216,13 +231,24 @@ async function syncDevice(device, conn) {
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
     if (lat === 0 && lon === 0) continue;
 
-    valid.push({
+    const payload = {
       deviceId: pgDeviceId,
       lat,
       lon,
       speed: Number(r.speed) || 0,
       heading: Number(r.course) || 0,
-      dt: new Date(r.devicetime || r.servertime),
+      time: new Date(r.devicetime || r.servertime),
+    };
+
+    valid.push(payload);
+
+    // realtime cache (safe)
+    await cacheLatestPosition(pgDeviceId, {
+      lat,
+      lon,
+      speed: payload.speed,
+      heading: payload.heading,
+      time: payload.time,
     });
   }
 
@@ -244,35 +270,10 @@ async function syncDevice(device, conn) {
     valid.map(v => v.lon),
     valid.map(v => v.speed),
     valid.map(v => v.heading),
-    valid.map(v => v.dt),
+    valid.map(v => v.time),
   ]);
 
-  /**
-   * =========================
-   * REDIS (SAFE NON-BLOCKING)
-   * =========================
-   */
-  
-   try {
-  const pipeline = redis.multi();
-
-  for (const v of valid) {
-    const key = `vehicle:${v.deviceId}:latest`;
-
-    pipeline.hSet(key, {
-      lat: String(v.lat),
-      lng: String(v.lon),
-      speed: String(v.speed),
-      heading: String(v.heading),
-      timestamp: String(v.dt.getTime()),
-    });
-
-    pipeline.expire(key, 60);
-  }
-
-  await pipeline.exec();
-} catch (e) {
-  log("warn", "Redis skipped", { error: e.message });
+  return { count: valid.length, maxId };
 }
 
 /**
@@ -294,8 +295,8 @@ export async function syncTelemetry() {
 
     let total = 0;
 
-    for (let i = 0; i < Math.min(devices.length, DEVICE_BATCH); i++) {
-      const r = await syncDevice(devices[i], conn);
+    for (const d of devices.slice(0, DEVICE_BATCH)) {
+      const r = await syncDevice(d, conn);
 
       if (r.count > 0) {
         total += r.count;
@@ -304,7 +305,7 @@ export async function syncTelemetry() {
           UPDATE devices
           SET positionid = GREATEST(positionid,$1)
           WHERE device_uid=$2
-        `, [r.maxId, devices[i].device_uid]);
+        `, [r.maxId, d.device_uid]);
       }
     }
 

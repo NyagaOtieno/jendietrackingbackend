@@ -52,13 +52,10 @@ global.io = io;
  */
 let isRunning = false;
 let syncInterval = null;
-let syncBooted = false;
-
-global.__MARIASYNC_RUNNING__ = false;
 
 /**
  * =========================
- * CORS (SAFE + PRODUCTION READY)
+ * CORS
  * =========================
  */
 app.use(
@@ -160,52 +157,43 @@ app.use((error, _req, res, _next) => {
 
 /**
  * =========================
- * 🚀 MARIA SYNC ENGINE (ROBUST 5s LOOP)
+ * 🚀 MARIA SYNC ENGINE (STABLE LOOP)
  * =========================
  */
 function startMariaSyncJob() {
-  if (syncBooted) return;
-
   if (process.env.SYNC_ENABLED !== "true") {
     console.log("⛔ Maria sync disabled");
     return;
   }
 
-  syncBooted = true;
-
   const intervalMs = Number(process.env.SYNC_INTERVAL || 5000);
 
   console.log(`⚡ MariaSync engine running every ${intervalMs / 1000}s`);
 
-<<<<<<< HEAD
-  // ✅ 5-second continuous interval (replaces cron)
-  const runSafe = async () => {
-=======
-  syncInterval = setInterval(async () => {
->>>>>>> 5b0ef29c8fa4d38fb94badd0ad3aac6175aa0b95
-    if (isRunning || global.__MARIASYNC_RUNNING__) return;
+  const runSync = async () => {
+    if (isRunning) return;
+
     isRunning = true;
-    global.__MARIASYNC_RUNNING__ = true;
+
     try {
       await runMariaSync();
     } catch (err) {
       console.error("❌ MariaSync failed:", err.message);
     } finally {
       isRunning = false;
-      global.__MARIASYNC_RUNNING__ = false;
     }
-<<<<<<< HEAD
   };
-  runSafe();
-  setInterval(runSafe, 5000);
-=======
-  }, intervalMs);
->>>>>>> 5b0ef29c8fa4d38fb94badd0ad3aac6175aa0b95
+
+  // initial run (fast boot sync)
+  runSync();
+
+  // stable interval loop
+  syncInterval = setInterval(runSync, intervalMs);
 }
 
 /**
  * =========================
- * GRACEFUL SHUTDOWN (SAFE PM2)
+ * GRACEFUL SHUTDOWN
  * =========================
  */
 function shutdown(signal) {
