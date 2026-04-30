@@ -7,7 +7,6 @@ dotenv.config();
  * =========================
  */
 import mariadbPkg from "mariadb";
-const mariadb = mariadbPkg;
 import { pgPool } from "../config/db.js";
 import { redis } from "../config/redis.js";
 
