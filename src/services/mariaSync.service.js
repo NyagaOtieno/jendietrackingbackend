@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import { createPool } from "mariadb";
+import mariadb from "mariadb";
 import { pgPool } from "../config/db.js";
 import { redis } from "../config/redisClient.js";
 
@@ -31,15 +31,17 @@ export { isSyncRunning };
 
 /**
  * =========================
- * MARIA POOL (SAFE)
+ * MARIA POOL
  * =========================
  */
-export const mariaPool = createPool({
+export const mariaPool = mariadb.createPool({
   host: process.env.MARIA_DB_HOST,
   user: process.env.MARIA_DB_USER,
   password: process.env.MARIA_DB_PASSWORD,
   database: process.env.MARIA_DB_NAME,
   connectionLimit: 10,
+  acquireTimeout: 30000,
+  connectTimeout: 30000,
 });
 
 /**
@@ -52,7 +54,7 @@ const EVENTS_BATCH = Number(process.env.EVENTS_BATCH || 200);
 
 /**
  * =========================
- * LOCK (SAFE)
+ * LOCK (HARDENED)
  * =========================
  */
 async function acquireLock() {
@@ -60,7 +62,7 @@ async function acquireLock() {
     const res = await pgPool.query(
       "SELECT pg_try_advisory_lock(778899) AS locked"
     );
-    return res.rows?.[0]?.locked;
+    return res.rows?.[0]?.locked === true;
   } catch (e) {
     log("error", "Lock error", { error: e.message });
     return false;
@@ -93,20 +95,18 @@ const N = (v) => {
 let deviceMapCache = new Map();
 
 async function loadDeviceMap() {
-  const { rows } = await pgPool.query("SELECT id, device_uid FROM devices");
+  const { rows } = await pgPool.query(
+    "SELECT id, device_uid FROM devices"
+  );
 
-  deviceMapCache.clear();
-
-  if (!rows?.length) return;
-
-  for (const r of rows) {
-    deviceMapCache.set(r.device_uid, r.id);
-  }
+  deviceMapCache = new Map(
+    (rows || []).map(r => [r.device_uid, r.id])
+  );
 }
 
 /**
  * =========================
- * VEHICLE SYNC (UNCHANGED LOGIC + SAFE)
+ * VEHICLE SYNC
  * =========================
  */
 export async function syncVehicles() {
@@ -166,18 +166,18 @@ export async function syncVehicles() {
       stack: e.stack,
     });
   } finally {
-    if (conn) conn.release();
+    conn?.release();
   }
 }
 
 /**
  * =========================
- * DEVICE SYNC (HARDENED)
+ * DEVICE SYNC
  * =========================
  */
 async function syncDevice(device, conn) {
   const deviceUid = device.device_uid;
-  const lastId = Number(device.positionid) || 0;
+  const lastId = N(device.positionid);
 
   if (!deviceUid) return { count: 0, maxId: lastId };
 
@@ -233,7 +233,10 @@ async function syncDevice(device, conn) {
       device_id, latitude, longitude,
       speed_kph, heading, device_time
     )
-    SELECT * FROM UNNEST ($1::int[], $2::float[], $3::float[], $4::float[], $5::float[], $6::timestamp[])
+    SELECT * FROM UNNEST (
+      $1::int[], $2::float[], $3::float[],
+      $4::float[], $5::float[], $6::timestamp[]
+    )
     ON CONFLICT DO NOTHING
   `, [
     valid.map(v => v.deviceId),
@@ -244,7 +247,11 @@ async function syncDevice(device, conn) {
     valid.map(v => v.dt),
   ]);
 
-  // Redis safe (no crash)
+  /**
+   * =========================
+   * REDIS (SAFE NON-BLOCKING)
+   * =========================
+   */
   try {
     const pipeline = redis.multi();
 
@@ -252,11 +259,11 @@ async function syncDevice(device, conn) {
       const key = `vehicle:${v.deviceId}:latest`;
 
       pipeline.hSet(key, {
-        lat: v.lat,
-        lng: v.lon,
-        speed: v.speed,
-        heading: v.heading,
-        timestamp: v.dt.getTime(),
+        lat: String(v.lat),
+        lng: String(v.lon),
+        speed: String(v.speed),
+        heading: String(v.heading),
+        timestamp: String(v.dt.getTime()),
       });
 
       pipeline.expire(key, 60);
@@ -289,8 +296,8 @@ export async function syncTelemetry() {
 
     let total = 0;
 
-    for (const d of devices.slice(0, DEVICE_BATCH)) {
-      const r = await syncDevice(d, conn);
+    for (let i = 0; i < Math.min(devices.length, DEVICE_BATCH); i++) {
+      const r = await syncDevice(devices[i], conn);
 
       if (r.count > 0) {
         total += r.count;
@@ -299,7 +306,7 @@ export async function syncTelemetry() {
           UPDATE devices
           SET positionid = GREATEST(positionid,$1)
           WHERE device_uid=$2
-        `, [r.maxId, d.device_uid]);
+        `, [r.maxId, devices[i].device_uid]);
       }
     }
 
@@ -311,13 +318,13 @@ export async function syncTelemetry() {
       stack: e.stack,
     });
   } finally {
-    if (conn) conn.release();
+    conn?.release();
   }
 }
 
 /**
  * =========================
- * MAIN SYNC (SAFE LOCKED)
+ * MAIN SYNC
  * =========================
  */
 export async function runMariaSync() {
