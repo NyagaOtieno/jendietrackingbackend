@@ -1,9 +1,19 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import * as mariadb from "mariadb";
+/**
+ * =========================
+ * DEPENDENCIES (SAFE IMPORTS)
+ * =========================
+ */
+import mariadbPkg from "mariadb";
 import { pgPool } from "../config/db.js";
 import { redis } from "../config/redis.js";
+
+/**
+ * Handle both CJS + ESM compatibility
+ */
+const mariadb = mariadbPkg?.default || mariadbPkg;
 
 /**
  * =========================
@@ -54,7 +64,7 @@ const EVENTS_BATCH = Number(process.env.EVENTS_BATCH || 200);
 
 /**
  * =========================
- * LOCK (IMPROVED SAFETY)
+ * LOCK
  * =========================
  */
 async function acquireLock() {
@@ -62,7 +72,6 @@ async function acquireLock() {
     const res = await pgPool.query(
       "SELECT pg_try_advisory_lock(778899) AS locked"
     );
-
     return res.rows?.[0]?.locked === true;
   } catch (e) {
     log("error", "Lock error", { error: e.message });
@@ -90,7 +99,7 @@ const N = (v) => {
 
 /**
  * =========================
- * DEVICE CACHE (OPTIMIZED)
+ * DEVICE CACHE
  * =========================
  */
 let deviceMapCache = new Map();
@@ -101,13 +110,36 @@ async function loadDeviceMap() {
   );
 
   deviceMapCache = new Map(
-    (rows || []).map((r) => [r.device_uid, r.id])
+    (rows || []).map(r => [r.device_uid, r.id])
   );
 }
 
 /**
  * =========================
- * VEHICLE SYNC (OPTIMIZED LOOP)
+ * REDIS CACHE (FIXED FOR NODE-REDIS v4)
+ * =========================
+ */
+async function cacheLatestPosition(deviceId, data) {
+  try {
+    const key = `vehicle:${deviceId}:latest`;
+
+    await redis.hSet(key, {
+      lat: String(data.lat),
+      lng: String(data.lon),
+      speed: String(data.speed),
+      heading: String(data.heading),
+      timestamp: String(data.time),
+    });
+
+    await redis.expire(key, 60);
+  } catch (e) {
+    log("warn", "Redis skipped", { error: e.message });
+  }
+}
+
+/**
+ * =========================
+ * VEHICLE SYNC
  * =========================
  */
 export async function syncVehicles() {
@@ -173,30 +205,7 @@ export async function syncVehicles() {
 
 /**
  * =========================
- * REDIS CACHE (SAFE + FAST)
- * =========================
- */
-async function cacheLatestPosition(deviceId, data) {
-  try {
-    const key = `vehicle:${deviceId}:latest`;
-
-    await redis.hset(key, {
-      lat: String(data.lat),
-      lng: String(data.lon),
-      speed: String(data.speed),
-      heading: String(data.heading),
-      timestamp: String(data.time.getTime()),
-    });
-
-    await redis.expire(key, 60);
-  } catch (e) {
-    log("warn", "Redis cache failed", { error: e.message });
-  }
-}
-
-/**
- * =========================
- * DEVICE SYNC (PERFORMANCE FIXED)
+ * DEVICE SYNC
  * =========================
  */
 async function syncDevice(device, conn) {
@@ -251,8 +260,7 @@ async function syncDevice(device, conn) {
 
     valid.push(payload);
 
-    // ⚡ async fire-and-forget (IMPORTANT PERFORMANCE FIX)
-    cacheLatestPosition(pgDeviceId, payload);
+    await cacheLatestPosition(pgDeviceId, payload);
   }
 
   if (!valid.length) return { count: 0, maxId };
@@ -281,7 +289,7 @@ async function syncDevice(device, conn) {
 
 /**
  * =========================
- * TELEMETRY SYNC (SAFE BATCH)
+ * TELEMETRY SYNC
  * =========================
  */
 export async function syncTelemetry() {
@@ -298,8 +306,8 @@ export async function syncTelemetry() {
 
     let total = 0;
 
-    for (let i = 0; i < Math.min(devices.length, DEVICE_BATCH); i++) {
-      const r = await syncDevice(devices[i], conn);
+    for (const d of devices.slice(0, DEVICE_BATCH)) {
+      const r = await syncDevice(d, conn);
 
       if (r.count > 0) {
         total += r.count;
@@ -308,7 +316,7 @@ export async function syncTelemetry() {
           UPDATE devices
           SET positionid = GREATEST(positionid,$1)
           WHERE device_uid=$2
-        `, [r.maxId, devices[i].device_uid]);
+        `, [r.maxId, d.device_uid]);
       }
     }
 
@@ -326,7 +334,7 @@ export async function syncTelemetry() {
 
 /**
  * =========================
- * MAIN SYNC (ROBUST LOCKED FLOW)
+ * MAIN SYNC
  * =========================
  */
 export async function runMariaSync() {
