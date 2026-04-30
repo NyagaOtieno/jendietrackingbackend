@@ -3,29 +3,37 @@ dotenv.config();
 
 import mariadb from "mariadb";
 import { pgPool } from "../config/db.js";
-import { redis } from "../config/redisClient.js"; // ✅ NEW
+import { redis } from "../config/redisClient.js";
 
-// ─────────────────────────────────────────────
-// LOGGER
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * LOGGER
+ * =========================
+ */
 const log = (level, msg, meta = {}) => {
-  console.log(JSON.stringify({
-    time: new Date().toISOString(),
-    level,
-    msg,
-    ...meta
-  }));
+  console.log(
+    JSON.stringify({
+      time: new Date().toISOString(),
+      level,
+      msg,
+      ...meta,
+    })
+  );
 };
 
-// ─────────────────────────────────────────────
-// STATE
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * STATE
+ * =========================
+ */
 let isSyncRunning = false;
 export { isSyncRunning };
 
-// ─────────────────────────────────────────────
-// MARIA DB POOL
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * MARIA POOL (SAFE)
+ * =========================
+ */
 export const mariaPool = mariadb.createPool({
   host: process.env.MARIA_DB_HOST,
   user: process.env.MARIA_DB_USER,
@@ -34,54 +42,73 @@ export const mariaPool = mariadb.createPool({
   connectionLimit: 10,
 });
 
-// ─────────────────────────────────────────────
-// CONFIG
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * CONFIG
+ * =========================
+ */
 const DEVICE_BATCH = Number(process.env.DEVICE_BATCH || 200);
 const EVENTS_BATCH = Number(process.env.EVENTS_BATCH || 200);
 
-// ─────────────────────────────────────────────
-// LOCK
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * LOCK (SAFE)
+ * =========================
+ */
 async function acquireLock() {
-  const res = await pgPool.query(
-    "SELECT pg_try_advisory_lock(778899) AS locked"
-  );
-  return res.rows[0].locked;
+  try {
+    const res = await pgPool.query(
+      "SELECT pg_try_advisory_lock(778899) AS locked"
+    );
+    return res.rows?.[0]?.locked;
+  } catch (e) {
+    log("error", "Lock error", { error: e.message });
+    return false;
+  }
 }
 
 async function releaseLock() {
-  await pgPool.query("SELECT pg_advisory_unlock(778899)");
+  try {
+    await pgPool.query("SELECT pg_advisory_unlock(778899)");
+  } catch (e) {
+    log("error", "Unlock error", { error: e.message });
+  }
 }
 
-// ─────────────────────────────────────────────
-// SAFE NUMBER
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * SAFE NUMBER
+ * =========================
+ */
 const N = (v) => {
-  if (v == null) return 0;
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
 
-// ─────────────────────────────────────────────
-// 🔥 DEVICE MAP CACHE (NEW - BIG PERFORMANCE BOOST)
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * DEVICE CACHE
+ * =========================
+ */
 let deviceMapCache = new Map();
 
 async function loadDeviceMap() {
-  const { rows } = await pgPool.query(
-    "SELECT id, device_uid FROM devices"
-  );
+  const { rows } = await pgPool.query("SELECT id, device_uid FROM devices");
 
   deviceMapCache.clear();
-  rows.forEach(r => {
+
+  if (!rows?.length) return;
+
+  for (const r of rows) {
     deviceMapCache.set(r.device_uid, r.id);
-  });
+  }
 }
 
-// ─────────────────────────────────────────────
-// VEHICLE SYNC (unchanged)
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * VEHICLE SYNC (UNCHANGED LOGIC + SAFE)
+ * =========================
+ */
 export async function syncVehicles() {
   let conn;
 
@@ -117,7 +144,7 @@ export async function syncVehicles() {
         r.reg_no || serial,
         `Unit ${serial}`,
         r.vmodel || "",
-        r.pstatus || "inactive"
+        r.pstatus || "inactive",
       ]);
 
       if (r.device_uid) {
@@ -134,22 +161,26 @@ export async function syncVehicles() {
     log("info", "Vehicle sync complete", { vehicles: count });
 
   } catch (e) {
-    log("error", "Vehicle sync failed", { error: e.message });
+    log("error", "Vehicle sync failed", {
+      error: e.message,
+      stack: e.stack,
+    });
   } finally {
     if (conn) conn.release();
   }
 }
 
-// ─────────────────────────────────────────────
-// DEVICE SYNC (IMPROVED)
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * DEVICE SYNC (HARDENED)
+ * =========================
+ */
 async function syncDevice(device, conn) {
   const deviceUid = device.device_uid;
   const lastId = Number(device.positionid) || 0;
 
   if (!deviceUid) return { count: 0, maxId: lastId };
 
-  // ✅ USE CACHE INSTEAD OF DB QUERY
   const pgDeviceId = deviceMapCache.get(deviceUid);
   if (!pgDeviceId) return { count: 0, maxId: lastId };
 
@@ -191,15 +222,12 @@ async function syncDevice(device, conn) {
       lon,
       speed: Number(r.speed) || 0,
       heading: Number(r.course) || 0,
-      dt: new Date(r.devicetime || r.servertime)
+      dt: new Date(r.devicetime || r.servertime),
     });
   }
 
   if (!valid.length) return { count: 0, maxId };
 
-  // ─────────────────────────────
-  // ✅ BATCH INSERT (BIG SPEED BOOST)
-  // ─────────────────────────────
   await pgPool.query(`
     INSERT INTO telemetry (
       device_id, latitude, longitude,
@@ -216,40 +244,43 @@ async function syncDevice(device, conn) {
     valid.map(v => v.dt),
   ]);
 
-  // ─────────────────────────────
-  // ✅ REDIS PIPELINE (REAL-TIME LAYER)
-  // ─────────────────────────────
-  const pipeline = redis.multi();
+  // Redis safe (no crash)
+  try {
+    const pipeline = redis.multi();
 
-  for (const v of valid) {
-    const key = `vehicle:${v.deviceId}:latest`;
+    for (const v of valid) {
+      const key = `vehicle:${v.deviceId}:latest`;
 
-    pipeline.hSet(key, {
-      lat: v.lat,
-      lng: v.lon,
-      speed: v.speed,
-      heading: v.heading,
-      timestamp: v.dt.getTime(),
-    });
+      pipeline.hSet(key, {
+        lat: v.lat,
+        lng: v.lon,
+        speed: v.speed,
+        heading: v.heading,
+        timestamp: v.dt.getTime(),
+      });
 
-    pipeline.expire(key, 60);
+      pipeline.expire(key, 60);
+    }
+
+    await pipeline.exec();
+  } catch (e) {
+    log("warn", "Redis skipped", { error: e.message });
   }
-
-  await pipeline.exec();
 
   return { count: valid.length, maxId };
 }
 
-// ─────────────────────────────────────────────
-// TELEMETRY SYNC
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * TELEMETRY SYNC
+ * =========================
+ */
 export async function syncTelemetry() {
   let conn;
 
   try {
     conn = await mariaPool.getConnection();
 
-    // 🔥 LOAD CACHE ONCE PER RUN
     await loadDeviceMap();
 
     const { rows: devices } = await pgPool.query(
@@ -275,20 +306,28 @@ export async function syncTelemetry() {
     log("info", "Telemetry sync complete", { total });
 
   } catch (e) {
-    log("error", "Telemetry sync failed", { error: e.message });
+    log("error", "Telemetry sync failed", {
+      error: e.message,
+      stack: e.stack,
+    });
   } finally {
     if (conn) conn.release();
   }
 }
 
-// ─────────────────────────────────────────────
-// MAIN SYNC
-// ─────────────────────────────────────────────
+/**
+ * =========================
+ * MAIN SYNC (SAFE LOCKED)
+ * =========================
+ */
 export async function runMariaSync() {
   if (isSyncRunning) return;
 
   const locked = await acquireLock();
-  if (!locked) return;
+  if (!locked) {
+    log("warn", "MariaSync skipped (lock not acquired)");
+    return;
+  }
 
   isSyncRunning = true;
 
@@ -301,7 +340,10 @@ export async function runMariaSync() {
     log("info", "MariaSync completed");
 
   } catch (e) {
-    log("error", "MariaSync failed", { error: e.message });
+    log("error", "MariaSync failed", {
+      error: e.message,
+      stack: e.stack,
+    });
   } finally {
     isSyncRunning = false;
     await releaseLock();
