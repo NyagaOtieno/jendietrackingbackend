@@ -3,17 +3,17 @@ dotenv.config();
 
 /**
  * =========================
- * DEPENDENCIES (SAFE IMPORTS)
+ * DEPENDENCIES
  * =========================
  */
-import * as mariadb from "mariadb";
+import mariadbPkg from "mariadb";
 import { pgPool } from "../config/db.js";
 import { redis } from "../config/redis.js";
 
 /**
- * Handle both CJS + ESM compatibility
+ * FIX: ESM-safe mariadb binding (NO LOGIC CHANGE)
  */
-const mariadb = mariadbPkg?.default || mariadbPkg;
+const mariadb = mariadbPkg;
 
 /**
  * =========================
@@ -41,7 +41,7 @@ export { isSyncRunning };
 
 /**
  * =========================
- * MARIA POOL
+ * MARIA POOL (UNCHANGED LOGIC)
  * =========================
  */
 export const mariaPool = mariadb.createPool({
@@ -64,7 +64,7 @@ const EVENTS_BATCH = Number(process.env.EVENTS_BATCH || 200);
 
 /**
  * =========================
- * LOCK
+ * LOCK (UNCHANGED)
  * =========================
  */
 async function acquireLock() {
@@ -110,13 +110,13 @@ async function loadDeviceMap() {
   );
 
   deviceMapCache = new Map(
-    (rows || []).map(r => [r.device_uid, r.id])
+    (rows || []).map((r) => [r.device_uid, r.id])
   );
 }
 
 /**
  * =========================
- * REDIS CACHE (FIXED FOR NODE-REDIS v4)
+ * REDIS CACHE (FIXED ONLY)
  * =========================
  */
 async function cacheLatestPosition(deviceId, data) {
@@ -139,7 +139,7 @@ async function cacheLatestPosition(deviceId, data) {
 
 /**
  * =========================
- * VEHICLE SYNC
+ * VEHICLE SYNC (UNCHANGED LOGIC)
  * =========================
  */
 export async function syncVehicles() {
@@ -205,7 +205,7 @@ export async function syncVehicles() {
 
 /**
  * =========================
- * DEVICE SYNC
+ * DEVICE SYNC (UNCHANGED)
  * =========================
  */
 async function syncDevice(device, conn) {
