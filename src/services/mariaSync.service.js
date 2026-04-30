@@ -252,29 +252,27 @@ async function syncDevice(device, conn) {
    * REDIS (SAFE NON-BLOCKING)
    * =========================
    */
-  try {
-    const pipeline = redis.multi();
+  
+   try {
+  const pipeline = redis.multi();
 
-    for (const v of valid) {
-      const key = `vehicle:${v.deviceId}:latest`;
+  for (const v of valid) {
+    const key = `vehicle:${v.deviceId}:latest`;
 
-      pipeline.hSet(key, {
-        lat: String(v.lat),
-        lng: String(v.lon),
-        speed: String(v.speed),
-        heading: String(v.heading),
-        timestamp: String(v.dt.getTime()),
-      });
+    pipeline.hSet(key, {
+      lat: String(v.lat),
+      lng: String(v.lon),
+      speed: String(v.speed),
+      heading: String(v.heading),
+      timestamp: String(v.dt.getTime()),
+    });
 
-      pipeline.expire(key, 60);
-    }
-
-    await pipeline.exec();
-  } catch (e) {
-    log("warn", "Redis skipped", { error: e.message });
+    pipeline.expire(key, 60);
   }
 
-  return { count: valid.length, maxId };
+  await pipeline.exec();
+} catch (e) {
+  log("warn", "Redis skipped", { error: e.message });
 }
 
 /**
