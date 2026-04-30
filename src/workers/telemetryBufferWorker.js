@@ -5,9 +5,14 @@ import { initMariaDB } from "../config/initDb.js";
 
 await initMariaDB();
 
-setInterval(() => {
-  runMariaSync();
-}, 5 * 60 * 1000);
+// MariaSync (every 30 sec)
+setInterval(async () => {
+  try {
+    await runMariaSync();
+  } catch (e) {
+    console.error("MariaSync error:", e.message);
+  }
+}, 30000);
 
 let isRunning = false;
 let intervalRef = null;
