@@ -6,10 +6,7 @@ const redis = createClient({
   url: REDIS_URL,
   socket: {
     reconnectStrategy: (retries) => {
-      if (retries > 10) {
-        console.error("❌ Redis max retries reached");
-        return new Error("Retry limit reached");
-      }
+      if (retries > 10) return new Error("Retry limit reached");
       return Math.min(retries * 200, 2000);
     },
   },
@@ -24,7 +21,4 @@ async function initRedis() {
   if (!redis.isOpen) await redis.connect();
 }
 
-module.exports = {
-  redis,
-  initRedis,
-};
+module.exports = { redis, initRedis };
