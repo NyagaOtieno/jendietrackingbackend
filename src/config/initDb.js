@@ -1,11 +1,14 @@
-import { mariaPool } from "./mariadb.pool.js";
+import { pgPool } from "./db.js";
+
+export async function initDb() {
+  try {
+    await pgPool.query("SELECT 1");
+    console.log("✅ PostgreSQL connected");
+  } catch (err) {
+    console.error("❌ PostgreSQL connection failed", err.message);
+  }
+}
 
 export async function initMariaDB() {
-  try {
-    const conn = await mariaPool.getConnection();
-    console.log("✅ MariaDB/MySQL connected");
-    conn.release();
-  } catch (err) {
-    console.error("❌ MariaDB/MySQL connection failed", err);
-  }
+  console.log("✅ MariaDB init — handled by mariaSync");
 }
