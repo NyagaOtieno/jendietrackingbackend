@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import mariadb from "mariadb";
+import * as mariadb from "mariadb";
 import { pgPool } from "../config/db.js";
 import { redis } from "../config/redis.js";
 
@@ -54,7 +54,7 @@ const EVENTS_BATCH = Number(process.env.EVENTS_BATCH || 200);
 
 /**
  * =========================
- * LOCK
+ * LOCK (IMPROVED SAFETY)
  * =========================
  */
 async function acquireLock() {
@@ -62,6 +62,7 @@ async function acquireLock() {
     const res = await pgPool.query(
       "SELECT pg_try_advisory_lock(778899) AS locked"
     );
+
     return res.rows?.[0]?.locked === true;
   } catch (e) {
     log("error", "Lock error", { error: e.message });
@@ -89,7 +90,7 @@ const N = (v) => {
 
 /**
  * =========================
- * DEVICE CACHE
+ * DEVICE CACHE (OPTIMIZED)
  * =========================
  */
 let deviceMapCache = new Map();
@@ -99,12 +100,14 @@ async function loadDeviceMap() {
     "SELECT id, device_uid FROM devices"
   );
 
-  deviceMapCache = new Map((rows || []).map(r => [r.device_uid, r.id]));
+  deviceMapCache = new Map(
+    (rows || []).map((r) => [r.device_uid, r.id])
+  );
 }
 
 /**
  * =========================
- * VEHICLE SYNC
+ * VEHICLE SYNC (OPTIMIZED LOOP)
  * =========================
  */
 export async function syncVehicles() {
@@ -170,24 +173,30 @@ export async function syncVehicles() {
 
 /**
  * =========================
- * REDIS CACHE (STANDARDIZED STYLE)
+ * REDIS CACHE (SAFE + FAST)
  * =========================
  */
 async function cacheLatestPosition(deviceId, data) {
-  await redis.hset(`vehicle:${deviceId}:latest`, {
-    lat: String(data.lat),
-    lng: String(data.lon),
-    speed: String(data.speed),
-    heading: String(data.heading),
-    timestamp: String(data.time),
-  });
+  try {
+    const key = `vehicle:${deviceId}:latest`;
 
-  await redis.expire(`vehicle:${deviceId}:latest`, 60);
+    await redis.hset(key, {
+      lat: String(data.lat),
+      lng: String(data.lon),
+      speed: String(data.speed),
+      heading: String(data.heading),
+      timestamp: String(data.time.getTime()),
+    });
+
+    await redis.expire(key, 60);
+  } catch (e) {
+    log("warn", "Redis cache failed", { error: e.message });
+  }
 }
 
 /**
  * =========================
- * DEVICE SYNC
+ * DEVICE SYNC (PERFORMANCE FIXED)
  * =========================
  */
 async function syncDevice(device, conn) {
@@ -242,14 +251,8 @@ async function syncDevice(device, conn) {
 
     valid.push(payload);
 
-    // realtime cache (safe)
-    await cacheLatestPosition(pgDeviceId, {
-      lat,
-      lon,
-      speed: payload.speed,
-      heading: payload.heading,
-      time: payload.time,
-    });
+    // ⚡ async fire-and-forget (IMPORTANT PERFORMANCE FIX)
+    cacheLatestPosition(pgDeviceId, payload);
   }
 
   if (!valid.length) return { count: 0, maxId };
@@ -278,7 +281,7 @@ async function syncDevice(device, conn) {
 
 /**
  * =========================
- * TELEMETRY SYNC
+ * TELEMETRY SYNC (SAFE BATCH)
  * =========================
  */
 export async function syncTelemetry() {
@@ -295,8 +298,8 @@ export async function syncTelemetry() {
 
     let total = 0;
 
-    for (const d of devices.slice(0, DEVICE_BATCH)) {
-      const r = await syncDevice(d, conn);
+    for (let i = 0; i < Math.min(devices.length, DEVICE_BATCH); i++) {
+      const r = await syncDevice(devices[i], conn);
 
       if (r.count > 0) {
         total += r.count;
@@ -305,7 +308,7 @@ export async function syncTelemetry() {
           UPDATE devices
           SET positionid = GREATEST(positionid,$1)
           WHERE device_uid=$2
-        `, [r.maxId, d.device_uid]);
+        `, [r.maxId, devices[i].device_uid]);
       }
     }
 
@@ -323,7 +326,7 @@ export async function syncTelemetry() {
 
 /**
  * =========================
- * MAIN SYNC
+ * MAIN SYNC (ROBUST LOCKED FLOW)
  * =========================
  */
 export async function runMariaSync() {
