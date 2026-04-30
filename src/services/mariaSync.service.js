@@ -6,7 +6,7 @@ dotenv.config();
  * DEPENDENCIES (SAFE IMPORTS)
  * =========================
  */
-import mariadbPkg from "mariadb";
+import * as mariadb from "mariadb";
 import { pgPool } from "../config/db.js";
 import { redis } from "../config/redis.js";
 

@@ -1,4 +1,3 @@
-// src/config/redisClient.js
 const { createClient } = require("redis");
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
@@ -25,4 +24,7 @@ async function initRedis() {
   if (!redis.isOpen) await redis.connect();
 }
 
-module.exports = { redis, initRedis };
+module.exports = {
+  redis,
+  initRedis,
+};
