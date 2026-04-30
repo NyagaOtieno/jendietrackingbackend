@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import mariadb from "mariadb";
+import { createPool } from "mariadb";
 import { pgPool } from "../config/db.js";
 import { redis } from "../config/redisClient.js";
 
@@ -34,7 +34,7 @@ export { isSyncRunning };
  * MARIA POOL (SAFE)
  * =========================
  */
-export const mariaPool = mariadb.createPool({
+export const mariaPool = createPool({
   host: process.env.MARIA_DB_HOST,
   user: process.env.MARIA_DB_USER,
   password: process.env.MARIA_DB_PASSWORD,
