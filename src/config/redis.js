@@ -1,17 +1,41 @@
-import Redis from "ioredis";
+// config/redisClient.js
+import { createClient } from "redis";
 
-export const redis = new Redis({
-  host: process.env.REDIS_HOST || "127.0.0.1",
-  port: Number(process.env.REDIS_PORT || 6379),
+const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
 
-  retryStrategy: (times) => Math.min(times * 200, 5000),
-
-  reconnectOnError: () => true,
-  maxRetriesPerRequest: null,
-  enableReadyCheck: true,
+export const redis = createClient({
+  url: REDIS_URL,
+  socket: {
+    reconnectStrategy: (retries) => {
+      if (retries > 10) {
+        console.error("❌ Redis max retries reached");
+        return new Error("Retry limit reached");
+      }
+      return Math.min(retries * 200, 2000); // exponential backoff
+    }
+  }
 });
 
-redis.on("connect", () => console.log("⚡ Redis connected"));
-redis.on("ready", () => console.log("🚀 Redis ready"));
-redis.on("error", (e) => console.error("❌ Redis error:", e.message));
-redis.on("reconnecting", () => console.warn("🔄 Redis reconnecting"));
+// Events
+redis.on("connect", () => {
+  console.log("🔌 Redis connecting...");
+});
+
+redis.on("ready", () => {
+  console.log("✅ Redis ready");
+});
+
+redis.on("error", (err) => {
+  console.error("❌ Redis error:", err.message);
+});
+
+redis.on("end", () => {
+  console.warn("⚠️ Redis connection closed");
+});
+
+// Safe connect (no top-level await issues in some setups)
+export async function initRedis() {
+  if (!redis.isOpen) {
+    await redis.connect();
+  }
+}

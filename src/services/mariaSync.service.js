@@ -1,8 +1,9 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import mariadb from "mariadb"; // ✅ correct ESM import
+import mariadb from "mariadb";
 import { pgPool } from "../config/db.js";
+import { redis } from "../config/redisClient.js"; // ✅ NEW
 
 // ─────────────────────────────────────────────
 // LOGGER
@@ -63,7 +64,23 @@ const N = (v) => {
 };
 
 // ─────────────────────────────────────────────
-// VEHICLE SYNC
+// 🔥 DEVICE MAP CACHE (NEW - BIG PERFORMANCE BOOST)
+// ─────────────────────────────────────────────
+let deviceMapCache = new Map();
+
+async function loadDeviceMap() {
+  const { rows } = await pgPool.query(
+    "SELECT id, device_uid FROM devices"
+  );
+
+  deviceMapCache.clear();
+  rows.forEach(r => {
+    deviceMapCache.set(r.device_uid, r.id);
+  });
+}
+
+// ─────────────────────────────────────────────
+// VEHICLE SYNC (unchanged)
 // ─────────────────────────────────────────────
 export async function syncVehicles() {
   let conn;
@@ -124,13 +141,17 @@ export async function syncVehicles() {
 }
 
 // ─────────────────────────────────────────────
-// DEVICE SYNC
+// DEVICE SYNC (IMPROVED)
 // ─────────────────────────────────────────────
 async function syncDevice(device, conn) {
   const deviceUid = device.device_uid;
   const lastId = Number(device.positionid) || 0;
 
   if (!deviceUid) return { count: 0, maxId: lastId };
+
+  // ✅ USE CACHE INSTEAD OF DB QUERY
+  const pgDeviceId = deviceMapCache.get(deviceUid);
+  if (!pgDeviceId) return { count: 0, maxId: lastId };
 
   const dev = await conn.query(
     "SELECT id FROM device WHERE uniqueid=? LIMIT 1",
@@ -140,15 +161,6 @@ async function syncDevice(device, conn) {
   if (!dev.length) return { count: 0, maxId: lastId };
 
   const mariaDeviceId = N(dev[0].id);
-
-  const pg = await pgPool.query(
-    "SELECT id FROM devices WHERE device_uid=$1 LIMIT 1",
-    [deviceUid]
-  );
-
-  if (!pg.rows.length) return { count: 0, maxId: lastId };
-
-  const pgDeviceId = pg.rows[0].id;
 
   const rows = await conn.query(`
     SELECT id, devicetime, servertime, latitude, longitude, speed, course
@@ -174,8 +186,7 @@ async function syncDevice(device, conn) {
     if (lat === 0 && lon === 0) continue;
 
     valid.push({
-      pgDeviceId,
-      id,
+      deviceId: pgDeviceId,
       lat,
       lon,
       speed: Number(r.speed) || 0,
@@ -186,23 +197,45 @@ async function syncDevice(device, conn) {
 
   if (!valid.length) return { count: 0, maxId };
 
+  // ─────────────────────────────
+  // ✅ BATCH INSERT (BIG SPEED BOOST)
+  // ─────────────────────────────
+  await pgPool.query(`
+    INSERT INTO telemetry (
+      device_id, latitude, longitude,
+      speed_kph, heading, device_time
+    )
+    SELECT * FROM UNNEST ($1::int[], $2::float[], $3::float[], $4::float[], $5::float[], $6::timestamp[])
+    ON CONFLICT DO NOTHING
+  `, [
+    valid.map(v => v.deviceId),
+    valid.map(v => v.lat),
+    valid.map(v => v.lon),
+    valid.map(v => v.speed),
+    valid.map(v => v.heading),
+    valid.map(v => v.dt),
+  ]);
+
+  // ─────────────────────────────
+  // ✅ REDIS PIPELINE (REAL-TIME LAYER)
+  // ─────────────────────────────
+  const pipeline = redis.multi();
+
   for (const v of valid) {
-    await pgPool.query(`
-      INSERT INTO telemetry (
-        device_id, latitude, longitude,
-        speed_kph, heading, device_time
-      )
-      VALUES ($1,$2,$3,$4,$5,$6)
-      ON CONFLICT DO NOTHING
-    `, [
-      v.pgDeviceId,
-      v.lat,
-      v.lon,
-      v.speed,
-      v.heading,
-      v.dt
-    ]);
+    const key = `vehicle:${v.deviceId}:latest`;
+
+    pipeline.hSet(key, {
+      lat: v.lat,
+      lng: v.lon,
+      speed: v.speed,
+      heading: v.heading,
+      timestamp: v.dt.getTime(),
+    });
+
+    pipeline.expire(key, 60);
   }
+
+  await pipeline.exec();
 
   return { count: valid.length, maxId };
 }
@@ -215,6 +248,9 @@ export async function syncTelemetry() {
 
   try {
     conn = await mariaPool.getConnection();
+
+    // 🔥 LOAD CACHE ONCE PER RUN
+    await loadDeviceMap();
 
     const { rows: devices } = await pgPool.query(
       "SELECT device_uid, positionid FROM devices"
