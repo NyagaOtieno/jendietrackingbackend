@@ -1,5 +1,4 @@
-// src/server.js
-import dotenv from 'dotenv';
+import dotenv from "dotenv";
 dotenv.config();
 
 /**
@@ -11,30 +10,30 @@ BigInt.prototype.toJSON = function () {
   return this.toString();
 };
 
-import express from 'express';
-import cors from 'cors';
-import cron from 'node-cron';
-import http from 'http';
+import express from "express";
+import cors from "cors";
+import http from "http";
 
-import { initWebSocket } from './socket/server.js';
-import { testDbConnection } from './config/db.js';
-import { initQueue } from './queue/index.js';
-import { runMariaSync } from './services/mariaSync.service.js';
-
-// routes
-import positionsRoutes from './routes/positions.routes.js';
-import fleetRoutes from './routes/fleet.routes.js';
-import authRoutes from './routes/auth.routes.js';
-import seedRoutes from './routes/seed.routes.js';
-import devicesRoutes from './routes/devices.routes.js';
-import accountsRoutes from './routes/accounts.routes.js';
-import vehiclesRoutes from './routes/vehicles.routes.js';
-import syncRoutes from './routes/sync.routes.js';
-import telemetryRoutes from './routes/telemetry.routes.js';
-import usersRoutes from './routes/users.routes.js';
+import { initWebSocket } from "./socket/server.js";
+import { testDbConnection } from "./config/db.js";
+import { initQueue } from "./queue/index.js";
+import { runMariaSync } from "./services/mariaSync.service.js";
 import { initDb } from "./config/initDb.js";
 
+// routes
+import positionsRoutes from "./routes/positions.routes.js";
+import fleetRoutes from "./routes/fleet.routes.js";
+import authRoutes from "./routes/auth.routes.js";
+import seedRoutes from "./routes/seed.routes.js";
+import devicesRoutes from "./routes/devices.routes.js";
+import accountsRoutes from "./routes/accounts.routes.js";
+import vehiclesRoutes from "./routes/vehicles.routes.js";
+import syncRoutes from "./routes/sync.routes.js";
+import telemetryRoutes from "./routes/telemetry.routes.js";
+import usersRoutes from "./routes/users.routes.js";
+
 await initDb();
+
 /**
  * =========================
  * APP + SERVER
@@ -52,7 +51,7 @@ global.io = io;
  * =========================
  */
 let isRunning = false;
-let cronStarted = false;
+let syncInterval = null;
 global.__MARIASYNC_RUNNING__ = false;
 
 /**
@@ -63,19 +62,19 @@ global.__MARIASYNC_RUNNING__ = false;
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-
       const allowed = [
-        'https://trackingfrontend.vercel.app',
-        'http://localhost:5173',
-        'http://localhost:8080',
-        'http://127.0.0.1:5173',
+        "https://trackingfrontend.vercel.app",
+        "http://localhost:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:5173",
       ];
 
-      const isAllowed =
-        allowed.includes(origin) || origin.endsWith('.vercel.app');
+      if (!origin) return callback(null, true);
 
-      return callback(null, true); // safe open API
+      const isAllowed =
+        allowed.includes(origin) || origin.endsWith(".vercel.app");
+
+      return callback(null, isAllowed);
     },
     credentials: true,
   })
@@ -98,12 +97,12 @@ app.use((req, _res, next) => {
  * HEALTH CHECK
  * =========================
  */
-app.get('/health', async (_req, res) => {
+app.get("/health", async (_req, res) => {
   try {
     await testDbConnection();
-    res.json({ success: true, database: 'up' });
+    res.json({ success: true, database: "up" });
   } catch {
-    res.status(500).json({ success: false, database: 'down' });
+    res.status(500).json({ success: false, database: "down" });
   }
 });
 
@@ -112,8 +111,8 @@ app.get('/health', async (_req, res) => {
  * ROOT
  * =========================
  */
-app.get('/', (_req, res) => {
-  res.send('🚀 Jendie Tracking Backend is running');
+app.get("/", (_req, res) => {
+  res.send("🚀 Jendie Tracking Backend is running");
 });
 
 /**
@@ -121,16 +120,16 @@ app.get('/', (_req, res) => {
  * ROUTES
  * =========================
  */
-app.use('/api/auth', authRoutes);
-app.use('/api/seed', seedRoutes);
-app.use('/api/accounts', accountsRoutes);
-app.use('/api/devices', devicesRoutes);
-app.use('/api/positions', positionsRoutes);
-app.use('/api/fleet', fleetRoutes);
-app.use('/api/vehicles', vehiclesRoutes);
-app.use('/api/sync', syncRoutes);
-app.use('/api/telemetry', telemetryRoutes);
-app.use('/api/users', usersRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/seed", seedRoutes);
+app.use("/api/accounts", accountsRoutes);
+app.use("/api/devices", devicesRoutes);
+app.use("/api/positions", positionsRoutes);
+app.use("/api/fleet", fleetRoutes);
+app.use("/api/vehicles", vehiclesRoutes);
+app.use("/api/sync", syncRoutes);
+app.use("/api/telemetry", telemetryRoutes);
+app.use("/api/users", usersRoutes);
 
 /**
  * =========================
@@ -150,32 +149,31 @@ app.use((req, res) => {
  * =========================
  */
 app.use((error, _req, res, _next) => {
-  console.error('❌ Error:', error);
+  console.error("❌ Error:", error);
   res.status(500).json({
     success: false,
-    message: 'Internal server error',
+    message: "Internal server error",
   });
 });
 
 /**
  * =========================
- * MARIA SYNC CRON JOB
+ * 🚀 MARIA SYNC (5 SECOND LOOP)
  * =========================
  */
-export function startMariaSyncJob() {
-  if (cronStarted) return;
+function startMariaSyncJob() {
+  if (syncInterval) return;
 
-  if (process.env.SYNC_ENABLED !== 'true') {
-    console.log('⛔ Maria sync disabled');
+  if (process.env.SYNC_ENABLED !== "true") {
+    console.log("⛔ Maria sync disabled");
     return;
   }
 
-  cronStarted = true;
+  const intervalMs = Number(process.env.SYNC_INTERVAL || 5000);
 
-  const schedule = process.env.SYNC_CRON || '*/5 * * * *';
-  console.log(`📦 Maria sync scheduled: ${schedule}`);
+  console.log(`⚡ MariaSync running every ${intervalMs / 1000} seconds`);
 
-  cron.schedule(schedule, async () => {
+  syncInterval = setInterval(async () => {
     if (isRunning || global.__MARIASYNC_RUNNING__) return;
 
     isRunning = true;
@@ -184,12 +182,12 @@ export function startMariaSyncJob() {
     try {
       await runMariaSync();
     } catch (err) {
-      console.error('❌ Maria Sync failed:', err.message);
+      console.error("❌ Maria Sync failed:", err.message);
     } finally {
       isRunning = false;
       global.__MARIASYNC_RUNNING__ = false;
     }
-  });
+  }, intervalMs);
 }
 
 /**
@@ -200,14 +198,16 @@ export function startMariaSyncJob() {
 function shutdown(signal) {
   console.log(`🛑 ${signal} received`);
 
+  if (syncInterval) clearInterval(syncInterval);
+
   server.close(() => {
-    console.log('✅ Server closed');
+    console.log("✅ Server closed");
     process.exit(0);
   });
 }
 
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 /**
  * =========================
@@ -220,22 +220,21 @@ async function startServer() {
   try {
     try {
       await testDbConnection();
-      console.log('✅ Database connected');
+      console.log("✅ Database connected");
     } catch (err) {
-      console.log('⚠️ DB warning:', err.message);
+      console.log("⚠️ DB warning:", err.message);
     }
 
     await initQueue().catch(() => {});
 
     startMariaSyncJob();
 
-    server.listen(PORT, '0.0.0.0', () => {
+    server.listen(PORT, "0.0.0.0", () => {
       console.log(`🚀 Backend running on port ${PORT}`);
       console.log(`⚡ WebSocket enabled`);
     });
-
   } catch (err) {
-    console.error('❌ Fatal error:', err);
+    console.error("❌ Fatal error:", err);
     process.exit(1);
   }
 }
