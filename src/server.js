@@ -47,16 +47,18 @@ global.io = io;
 
 /**
  * =========================
- * STATE FLAGS
+ * SAFE STATE CONTROL
  * =========================
  */
 let isRunning = false;
 let syncInterval = null;
+let syncBooted = false;
+
 global.__MARIASYNC_RUNNING__ = false;
 
 /**
  * =========================
- * CORS
+ * CORS (SAFE + PRODUCTION READY)
  * =========================
  */
 app.use(
@@ -158,20 +160,22 @@ app.use((error, _req, res, _next) => {
 
 /**
  * =========================
- * 🚀 MARIA SYNC (5 SECOND LOOP)
+ * 🚀 MARIA SYNC ENGINE (ROBUST 5s LOOP)
  * =========================
  */
 function startMariaSyncJob() {
-  if (syncInterval) return;
+  if (syncBooted) return;
 
   if (process.env.SYNC_ENABLED !== "true") {
     console.log("⛔ Maria sync disabled");
     return;
   }
 
+  syncBooted = true;
+
   const intervalMs = Number(process.env.SYNC_INTERVAL || 5000);
 
-  console.log(`⚡ MariaSync running every ${intervalMs / 1000} seconds`);
+  console.log(`⚡ MariaSync engine running every ${intervalMs / 1000}s`);
 
 <<<<<<< HEAD
   // ✅ 5-second continuous interval (replaces cron)
@@ -185,7 +189,7 @@ function startMariaSyncJob() {
     try {
       await runMariaSync();
     } catch (err) {
-      console.error("❌ Maria Sync failed:", err.message);
+      console.error("❌ MariaSync failed:", err.message);
     } finally {
       isRunning = false;
       global.__MARIASYNC_RUNNING__ = false;
@@ -201,7 +205,7 @@ function startMariaSyncJob() {
 
 /**
  * =========================
- * GRACEFUL SHUTDOWN
+ * GRACEFUL SHUTDOWN (SAFE PM2)
  * =========================
  */
 function shutdown(signal) {
@@ -210,7 +214,7 @@ function shutdown(signal) {
   if (syncInterval) clearInterval(syncInterval);
 
   server.close(() => {
-    console.log("✅ Server closed");
+    console.log("✅ Server closed cleanly");
     process.exit(0);
   });
 }
