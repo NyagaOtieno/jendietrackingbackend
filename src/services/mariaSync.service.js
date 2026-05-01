@@ -121,29 +121,31 @@ async function syncTelemetry() {
 
     // Get ALL latest events per device in one query (most efficient)
     const rows = await conn.query(`
-      SELECT 
-        e.id          AS event_id,
-       e.deviceid    AS device_uid,
-       e.latitude    AS latitude,
-        e.longitude   AS longitude,
-        e.speed       AS speed_kph,
-        e.course      AS heading,
-        e.servertime  AS received_at,
-        e.devicetime  AS device_time,
-        e.altitude    AS altitude,
-        e.event       AS event_type
-      FROM eventData e
-      INNER JOIN (
-        SELECT deviceid, MAX(id) as max_id
-      FROM eventData
-        WHERE servertime > ?
-          AND latitude != 0 AND longitude != 0
-          AND latitude BETWEEN -90 AND 90
-          AND longitude BETWEEN -180 AND 180
-        GROUP BY deviceid
-      ) latest ON e.unitid = latest.unitid AND e.id = latest.max_id
-      ORDER BY e.servertime DESC
-      LIMIT 10000
+     SELECT 
+  e.id          AS event_id,
+  d.uniqueid    AS device_uid,
+  e.latitude    AS latitude,
+  e.longitude   AS longitude,
+  e.speed       AS speed_kph,
+  e.course      AS heading,
+  e.servertime  AS received_at,
+  e.devicetime  AS device_time,
+  e.altitude    AS altitude,
+  e.alarmcode   AS event_type
+FROM eventData e
+JOIN device d ON e.deviceid = d.id
+INNER JOIN (
+  SELECT deviceid, MAX(id) as max_id
+  FROM eventData
+  WHERE servertime > ?
+    AND latitude != 0 AND longitude != 0
+    AND latitude BETWEEN -90 AND 90
+    AND longitude BETWEEN -180 AND 180
+  GROUP BY deviceid
+) latest 
+ON e.deviceid = latest.deviceid AND e.id = latest.max_id
+ORDER BY e.servertime DESC
+LIMIT 10000;
     `, [sinceStr]);
 
     console.log(`[MariaSync] Got ${rows.length} latest-position rows from MariaDB`);
@@ -156,7 +158,7 @@ async function syncTelemetry() {
 
     // Also get all telemetry rows (not just latest) for the telemetry table
     const telemetryRows = await conn.query(`
-     SELECT 
+  SELECT 
   e.id          AS event_id,
   d.uniqueid    AS device_uid,
   e.latitude    AS latitude,
@@ -165,15 +167,16 @@ async function syncTelemetry() {
   e.course      AS heading,
   e.servertime  AS received_at,
   e.devicetime  AS device_time,
-  e.altitude    AS altitude
+  e.altitude    AS altitude,
+  e.alarmcode   AS event_type
 FROM eventData e
 JOIN device d ON e.deviceid = d.id
-      WHERE e.servertime > ?
-        AND e.lat != 0 AND e.lng != 0
-        AND e.lat BETWEEN -90 AND 90
-        AND e.lng BETWEEN -180 AND 180
-      ORDER BY e.servertime ASC
-      LIMIT 50000
+WHERE e.servertime > ?
+  AND e.latitude != 0 AND e.longitude != 0
+  AND e.latitude BETWEEN -90 AND 90
+  AND e.longitude BETWEEN -180 AND 180
+ORDER BY e.servertime ASC
+LIMIT 50000;
     `, [sinceStr]);
 
     console.log(`[MariaSync] Got ${telemetryRows.length} telemetry rows`);
