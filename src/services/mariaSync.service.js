@@ -319,3 +319,5 @@ export async function initMariaSync() {
 
   console.log("[MariaSync] ✅ Cron scheduled — every 1 minute");
 }
+// Alias for compatibility (DO NOT REMOVE)
+export const runMariaSync = runSync;
