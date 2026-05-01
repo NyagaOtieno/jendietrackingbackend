@@ -123,9 +123,9 @@ async function syncTelemetry() {
     const rows = await conn.query(`
       SELECT 
         e.id          AS event_id,
-        e.unitid      AS device_uid,
-        e.lat         AS latitude,
-        e.lng         AS longitude,
+       e.deviceid    AS device_uid,
+       e.latitude    AS latitude,
+        e.longitude   AS longitude,
         e.speed       AS speed_kph,
         e.course      AS heading,
         e.servertime  AS received_at,
@@ -134,13 +134,13 @@ async function syncTelemetry() {
         e.event       AS event_type
       FROM eventData e
       INNER JOIN (
-        SELECT unitid, MAX(id) as max_id
-        FROM eventData
+        SELECT deviceid, MAX(id) as max_id
+      FROM eventData
         WHERE servertime > ?
-          AND lat != 0 AND lng != 0
-          AND lat BETWEEN -90 AND 90
-          AND lng BETWEEN -180 AND 180
-        GROUP BY unitid
+          AND latitude != 0 AND longitude != 0
+          AND latitude BETWEEN -90 AND 90
+          AND longitude BETWEEN -180 AND 180
+        GROUP BY deviceid
       ) latest ON e.unitid = latest.unitid AND e.id = latest.max_id
       ORDER BY e.servertime DESC
       LIMIT 10000
@@ -156,18 +156,18 @@ async function syncTelemetry() {
 
     // Also get all telemetry rows (not just latest) for the telemetry table
     const telemetryRows = await conn.query(`
-      SELECT 
-        e.id          AS event_id,
-        e.unitid      AS device_uid,
-        e.lat         AS latitude,
-        e.lng         AS longitude,
-        e.speed       AS speed_kph,
-        e.course      AS heading,
-        e.servertime  AS received_at,
-        e.devicetime  AS device_time,
-        e.altitude    AS altitude,
-        e.event       AS event_type
-      FROM eventData e
+     SELECT 
+  e.id          AS event_id,
+  d.uniqueid    AS device_uid,
+  e.latitude    AS latitude,
+  e.longitude   AS longitude,
+  e.speed       AS speed_kph,
+  e.course      AS heading,
+  e.servertime  AS received_at,
+  e.devicetime  AS device_time,
+  e.altitude    AS altitude
+FROM eventData e
+JOIN device d ON e.deviceid = d.id
       WHERE e.servertime > ?
         AND e.lat != 0 AND e.lng != 0
         AND e.lat BETWEEN -90 AND 90
