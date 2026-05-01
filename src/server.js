@@ -17,7 +17,6 @@ import http from "http";
 import { initWebSocket } from "./socket/server.js";
 import { testDbConnection } from "./config/db.js";
 import { initQueue } from "./queue/index.js";
-import { runMariaSync } from "./services/mariaSync.service.js";
 import { initDb } from "./config/initDb.js";
 
 // routes
@@ -47,15 +46,7 @@ global.io = io;
 
 /**
  * =========================
- * SAFE STATE CONTROL
- * =========================
- */
-let mariaRunning = false;
-let mariaInterval = null;
-
-/**
- * =========================
- * CORS
+ * CORS (SAFE + PRODUCTION READY)
  * =========================
  */
 app.use(
@@ -67,12 +58,8 @@ app.use(
         "http://localhost:8080",
         "http://127.0.0.1:5173",
       ];
-
       if (!origin) return callback(null, true);
-
-      const isAllowed =
-        allowed.includes(origin) || origin.endsWith(".vercel.app");
-
+      const isAllowed = allowed.includes(origin) || origin.endsWith(".vercel.app");
       return callback(null, isAllowed);
     },
     credentials: true,
@@ -107,6 +94,15 @@ app.get("/health", async (_req, res) => {
 
 /**
  * =========================
+ * ROOT
+ * =========================
+ */
+app.get("/", (_req, res) => {
+  res.send("🚀 Jendie Tracking Backend is running");
+});
+
+/**
+ * =========================
  * ROUTES
  * =========================
  */
@@ -123,7 +119,7 @@ app.use("/api/users", usersRoutes);
 
 /**
  * =========================
- * ERROR HANDLING
+ * 404 HANDLER
  * =========================
  */
 app.use((req, res) => {
@@ -133,6 +129,11 @@ app.use((req, res) => {
   });
 });
 
+/**
+ * =========================
+ * ERROR HANDLER
+ * =========================
+ */
 app.use((error, _req, res, _next) => {
   console.error("❌ Error:", error);
   res.status(500).json({
@@ -143,46 +144,11 @@ app.use((error, _req, res, _next) => {
 
 /**
  * =========================
- * MARIA SYNC ENGINE (FIXED)
- * =========================
- */
-function startMariaSync() {
-  if (process.env.SYNC_ENABLED !== "true") {
-    console.log("⛔ Maria sync disabled");
-    return;
-  }
-
-  const interval = Number(process.env.SYNC_INTERVAL || 5000);
-
-  const run = async () => {
-    if (mariaRunning) return;
-
-    mariaRunning = true;
-    try {
-      await runMariaSync();
-    } catch (e) {
-      console.error("❌ MariaSync failed:", e.message);
-    } finally {
-      mariaRunning = false;
-    }
-  };
-
-  console.log(`⚡ MariaSync running every ${interval / 1000}s`);
-
-  run();
-  mariaInterval = setInterval(run, interval);
-}
-
-/**
- * =========================
- * SHUTDOWN
+ * GRACEFUL SHUTDOWN
  * =========================
  */
 function shutdown(signal) {
   console.log(`🛑 ${signal} received`);
-
-  if (mariaInterval) clearInterval(mariaInterval);
-
   server.close(() => {
     console.log("✅ Server closed cleanly");
     process.exit(0);
@@ -197,15 +163,18 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
  * START SERVER
  * =========================
  */
-const PORT = process.env.PORT || 4001;
+const PORT = process.env.PORT || 4000;
 
 async function startServer() {
   try {
-    await testDbConnection().catch(() => {});
+    try {
+      await testDbConnection();
+      console.log("✅ Database connected");
+    } catch (err) {
+      console.log("⚠️ DB warning:", err.message);
+    }
 
     await initQueue().catch(() => {});
-
-    startMariaSync();
 
     server.listen(PORT, "0.0.0.0", () => {
       console.log(`🚀 Backend running on port ${PORT}`);
