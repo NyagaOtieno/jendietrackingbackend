@@ -3,17 +3,16 @@ import { publishTelemetryBatch } from "../queue/publisher.js";
 import { runMariaSync } from "../services/mariaSync.service.js";
 import { initMariaDB } from "../config/initDb.js";
 
-await initMariaDB();
+// ─────────────────────────────────────────────
+// INIT DB FIRST (SAFE STARTUP)
+// ─────────────────────────────────────────────
+export async function initWorkerDependencies() {
+  await initMariaDB();
+}
 
-// MariaSync (every 30 sec)
-setInterval(async () => {
-  try {
-    await runMariaSync();
-  } catch (e) {
-    console.error("MariaSync error:", e.message);
-  }
-}, 30000);
-
+// ─────────────────────────────────────────────
+// STATE CONTROL
+// ─────────────────────────────────────────────
 let isRunning = false;
 let intervalRef = null;
 
@@ -21,6 +20,27 @@ const BATCH_SIZE = 1000;
 const INTERVAL = 5000;
 const MAX_RETRY = 5;
 
+// ─────────────────────────────────────────────
+// MARIA SYNC (CONTROLLED, NO DUPLICATES)
+// ─────────────────────────────────────────────
+let mariaSyncRunning = false;
+
+async function safeMariaSync() {
+  if (mariaSyncRunning) return;
+
+  mariaSyncRunning = true;
+  try {
+    await runMariaSync();
+  } catch (e) {
+    console.error("MariaSync error:", e.message);
+  } finally {
+    mariaSyncRunning = false;
+  }
+}
+
+// ─────────────────────────────────────────────
+// START WORKER
+// ─────────────────────────────────────────────
 export function startTelemetryBufferWorker() {
   console.log("🚀 Telemetry Buffer Worker started");
 
@@ -29,6 +49,9 @@ export function startTelemetryBufferWorker() {
   intervalRef = setInterval(processBatch, INTERVAL);
 }
 
+// ─────────────────────────────────────────────
+// PROCESS BUFFER BATCH
+// ─────────────────────────────────────────────
 async function processBatch() {
   if (isRunning) return;
   isRunning = true;
@@ -88,6 +111,27 @@ async function processBatch() {
   }
 }
 
+// ─────────────────────────────────────────────
+// MASTER START (THIS IS THE IMPORTANT PART)
+// ─────────────────────────────────────────────
+export async function startSystem() {
+  console.log("🚀 Starting Telemetry System...");
+
+  await initWorkerDependencies();
+
+  // start buffer worker
+  startTelemetryBufferWorker();
+
+  // controlled MariaSync loop (NO overlap)
+  setInterval(safeMariaSync, 30000);
+
+  // initial run
+  safeMariaSync();
+}
+
+// ─────────────────────────────────────────────
+// STOP WORKER
+// ─────────────────────────────────────────────
 export function stopTelemetryBufferWorker() {
   if (intervalRef) {
     clearInterval(intervalRef);
