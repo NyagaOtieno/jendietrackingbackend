@@ -6,14 +6,14 @@ import { fileURLToPath } from "url";
 import path from "path";
 
 // ─────────────────────────────────────────────
-// INIT DB FIRST (SAFE STARTUP)
+// INIT DB
 // ─────────────────────────────────────────────
 export async function initWorkerDependencies() {
   await initMariaDB();
 }
 
 // ─────────────────────────────────────────────
-// STATE CONTROL
+// STATE
 // ─────────────────────────────────────────────
 let isRunning = false;
 let intervalRef = null;
@@ -22,11 +22,11 @@ const BATCH_SIZE = 1000;
 const INTERVAL = 5000;
 const MAX_RETRY = 5;
 
-// ─────────────────────────────────────────────
-// MARIA SYNC (CONTROLLED, NO DUPLICATES)
-// ─────────────────────────────────────────────
 let mariaSyncRunning = false;
 
+// ─────────────────────────────────────────────
+// SAFE MARIA SYNC
+// ─────────────────────────────────────────────
 async function safeMariaSync() {
   if (mariaSyncRunning) return;
 
@@ -41,38 +41,34 @@ async function safeMariaSync() {
 }
 
 // ─────────────────────────────────────────────
-// START WORKER
+// WORKER START
 // ─────────────────────────────────────────────
 export function startTelemetryBufferWorker() {
-  console.log("🚀 Telemetry Buffer Worker started");
-
   if (intervalRef) return;
+
+  console.log("🚀 Telemetry Buffer Worker started");
 
   intervalRef = setInterval(processBatch, INTERVAL);
 }
 
 // ─────────────────────────────────────────────
-// PROCESS BUFFER BATCH (FIXED SAFE LOCK)
+// PROCESS BATCH (FIXED SAFE LOCK)
 // ─────────────────────────────────────────────
 async function processBatch() {
   if (isRunning) return;
+
   isRunning = true;
 
   try {
-    const { rows } = await pgPool.query(
-      `
+    const { rows } = await pgPool.query(`
       SELECT id, payload, retry_count
       FROM telemetry_ingestion_buffer
       WHERE status = 'PENDING'
       ORDER BY created_at ASC
       LIMIT $1
-      `,
-      [BATCH_SIZE]
-    );
+    `, [BATCH_SIZE]);
 
-    if (!rows || rows.length === 0) {
-      return; // FIXED: no data but still must release lock
-    }
+    if (!rows?.length) return;
 
     const successIds = [];
 
@@ -81,43 +77,36 @@ async function processBatch() {
         const payload = JSON.parse(row.payload);
         await publishTelemetryBatch(payload);
         successIds.push(row.id);
-      } catch (err) {
+      } catch (e) {
         const retry = (row.retry_count || 0) + 1;
-        const status = retry >= MAX_RETRY ? "FAILED" : "PENDING";
 
-        await pgPool.query(
-          `
+        await pgPool.query(`
           UPDATE telemetry_ingestion_buffer
           SET retry_count = $2,
-              status = $3
+              status = CASE WHEN $2 >= $3 THEN 'FAILED' ELSE 'PENDING' END
           WHERE id = $1
-          `,
-          [row.id, retry, status]
-        );
+        `, [row.id, retry, MAX_RETRY]);
       }
     }
 
-    // FIXED: avoid SQL error on empty array
-    if (successIds.length > 0) {
-      await pgPool.query(
-        `
+    if (successIds.length) {
+      await pgPool.query(`
         UPDATE telemetry_ingestion_buffer
         SET status = 'PROCESSED',
             processed_at = NOW()
         WHERE id = ANY($1)
-        `,
-        [successIds]
-      );
+      `, [successIds]);
     }
+
   } catch (e) {
     console.error("Worker error:", e.message);
   } finally {
-    isRunning = false; // ALWAYS RELEASE LOCK
+    isRunning = false;
   }
 }
 
 // ─────────────────────────────────────────────
-// MASTER START (UNCHANGED LOGIC, SAFER BOOT)
+// START SYSTEM
 // ─────────────────────────────────────────────
 export async function startSystem() {
   console.log("🚀 Starting Telemetry System...");
@@ -126,32 +115,29 @@ export async function startSystem() {
 
   startTelemetryBufferWorker();
 
-  setInterval(safeMariaSync, 30000);
-
   safeMariaSync();
 }
 
 // ─────────────────────────────────────────────
-// STOP WORKER
+// STOP
 // ─────────────────────────────────────────────
 export function stopTelemetryBufferWorker() {
   if (intervalRef) {
     clearInterval(intervalRef);
     intervalRef = null;
-    console.log("🛑 Worker stopped");
   }
 }
 
 // ─────────────────────────────────────────────
-// SAFE AUTO-START (PM2 FRIENDLY, NON-BREAKING)
+// AUTO START
 // ─────────────────────────────────────────────
 const isMainModule =
   process.argv[1] &&
   path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 
 if (isMainModule) {
-  startSystem().catch((err) => {
-    console.error("Worker failed to start:", err);
+  startSystem().catch(err => {
+    console.error("Worker failed:", err);
     process.exit(1);
   });
 }

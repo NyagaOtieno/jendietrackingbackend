@@ -50,8 +50,8 @@ global.io = io;
  * SAFE STATE CONTROL
  * =========================
  */
-let isRunning = false;
-let syncInterval = null;
+let mariaRunning = false;
+let mariaInterval = null;
 
 /**
  * =========================
@@ -107,15 +107,6 @@ app.get("/health", async (_req, res) => {
 
 /**
  * =========================
- * ROOT
- * =========================
- */
-app.get("/", (_req, res) => {
-  res.send("🚀 Jendie Tracking Backend is running");
-});
-
-/**
- * =========================
  * ROUTES
  * =========================
  */
@@ -132,7 +123,7 @@ app.use("/api/users", usersRoutes);
 
 /**
  * =========================
- * 404 HANDLER
+ * ERROR HANDLING
  * =========================
  */
 app.use((req, res) => {
@@ -142,11 +133,6 @@ app.use((req, res) => {
   });
 });
 
-/**
- * =========================
- * ERROR HANDLER
- * =========================
- */
 app.use((error, _req, res, _next) => {
   console.error("❌ Error:", error);
   res.status(500).json({
@@ -157,47 +143,45 @@ app.use((error, _req, res, _next) => {
 
 /**
  * =========================
- * 🚀 MARIA SYNC ENGINE (SAFE GUARD IMPROVED)
+ * MARIA SYNC ENGINE (FIXED)
  * =========================
  */
-function startMariaSyncJob() {
+function startMariaSync() {
   if (process.env.SYNC_ENABLED !== "true") {
     console.log("⛔ Maria sync disabled");
     return;
   }
 
-  const intervalMs = Number(process.env.SYNC_INTERVAL || 5000);
+  const interval = Number(process.env.SYNC_INTERVAL || 5000);
 
-  console.log(`⚡ MariaSync engine running every ${intervalMs / 1000}s`);
+  const run = async () => {
+    if (mariaRunning) return;
 
-  const runSync = async () => {
-    if (isRunning) return;
-
-    isRunning = true;
-
+    mariaRunning = true;
     try {
       await runMariaSync();
-    } catch (err) {
-      console.error("❌ MariaSync failed:", err.message);
+    } catch (e) {
+      console.error("❌ MariaSync failed:", e.message);
     } finally {
-      isRunning = false;
+      mariaRunning = false;
     }
   };
 
-  runSync();
+  console.log(`⚡ MariaSync running every ${interval / 1000}s`);
 
-  syncInterval = setInterval(runSync, intervalMs);
+  run();
+  mariaInterval = setInterval(run, interval);
 }
 
 /**
  * =========================
- * GRACEFUL SHUTDOWN
+ * SHUTDOWN
  * =========================
  */
 function shutdown(signal) {
   console.log(`🛑 ${signal} received`);
 
-  if (syncInterval) clearInterval(syncInterval);
+  if (mariaInterval) clearInterval(mariaInterval);
 
   server.close(() => {
     console.log("✅ Server closed cleanly");
@@ -217,16 +201,11 @@ const PORT = process.env.PORT || 4001;
 
 async function startServer() {
   try {
-    try {
-      await testDbConnection();
-      console.log("✅ Database connected");
-    } catch (err) {
-      console.log("⚠️ DB warning:", err.message);
-    }
+    await testDbConnection().catch(() => {});
 
     await initQueue().catch(() => {});
 
-    startMariaSyncJob();
+    startMariaSync();
 
     server.listen(PORT, "0.0.0.0", () => {
       console.log(`🚀 Backend running on port ${PORT}`);
