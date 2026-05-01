@@ -157,7 +157,7 @@ app.use((error, _req, res, _next) => {
 
 /**
  * =========================
- * 🚀 MARIA SYNC ENGINE (STABLE LOOP)
+ * 🚀 MARIA SYNC ENGINE (SAFE GUARD IMPROVED)
  * =========================
  */
 function startMariaSyncJob() {
@@ -184,10 +184,8 @@ function startMariaSyncJob() {
     }
   };
 
-  // initial run (fast boot sync)
   runSync();
 
-  // stable interval loop
   syncInterval = setInterval(runSync, intervalMs);
 }
 
