@@ -1,29 +1,26 @@
+// src/services/mariaSync.service.js
 import dotenv from "dotenv";
 dotenv.config();
 
 import { createPool } from "mariadb";
 import { pgPool } from "../config/db.js";
+import { redis } from "../config/redis.js";
 
-/**
- * =========================
- * LOGGER
- * =========================
- */
+// ─────────────────────────────────────────────
+// LOGGER
+// ─────────────────────────────────────────────
 const log = (level, msg, meta = {}) =>
   console.log(JSON.stringify({ time: new Date().toISOString(), level, msg, ...meta }));
 
-/**
- * =========================
- * STATE
- * =========================
- */
+// ─────────────────────────────────────────────
+// STATE
+// ─────────────────────────────────────────────
 export let isSyncRunning = false;
+let lastSyncTime = null;
 
-/**
- * =========================
- * MARIA POOL (named export for createPool)
- * =========================
- */
+// ─────────────────────────────────────────────
+// MARIA POOL
+// ─────────────────────────────────────────────
 export const mariaPool = createPool({
   host:            process.env.MARIADB_HOST     || process.env.MARIA_DB_HOST     || "18.218.110.222",
   port:     Number(process.env.MARIADB_PORT     || process.env.MARIA_DB_PORT     || 3306),
@@ -35,30 +32,38 @@ export const mariaPool = createPool({
   acquireTimeout:  20000,
 });
 
-/**
- * =========================
- * CONFIG
- * =========================
- */
-const EVENTS_BATCH  = Number(process.env.EVENTS_BATCH  || 500);
-const DEVICE_BATCH  = Number(process.env.DEVICE_BATCH  || 300);
+// ─────────────────────────────────────────────
+// CONFIG
+// ─────────────────────────────────────────────
+const EVENTS_BATCH = Number(process.env.EVENTS_BATCH || 500);
+const DEVICE_BATCH = Number(process.env.DEVICE_BATCH || 300);
 
-/**
- * =========================
- * SAFE NUMBER
- * =========================
- */
-const N = (v) => {
+// ─────────────────────────────────────────────
+// SAFE NUMBER
+// ─────────────────────────────────────────────
+function N(v) {
   if (v === null || v === undefined) return null;
   const n = typeof v === "bigint" ? Number(v) : Number(v);
   return Number.isFinite(n) ? n : null;
-};
+}
 
-/**
- * =========================
- * LOCK
- * =========================
- */
+// ─────────────────────────────────────────────
+// MARIA CONNECTION WITH RETRY
+// ─────────────────────────────────────────────
+async function getMariaConn(retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await mariaPool.getConnection();
+    } catch (e) {
+      if (i === retries - 1) throw e;
+      await new Promise(r => setTimeout(r, 3000 * (i + 1)));
+    }
+  }
+}
+
+// ─────────────────────────────────────────────
+// ADVISORY LOCK (prevent double-run)
+// ─────────────────────────────────────────────
 async function acquireLock() {
   try {
     const res = await pgPool.query("SELECT pg_try_advisory_lock(778899) AS locked");
@@ -77,95 +82,127 @@ async function releaseLock() {
   }
 }
 
-/**
- * =========================
- * DEVICE MAP CACHE
- * uid → { pgDeviceId, pgVehicleId }
- * =========================
- */
+// ─────────────────────────────────────────────
+// DEVICE MAP CACHE
+// device_uid (string) → { pgDeviceId, pgVehicleId }
+// Loaded once per sync cycle — avoids N+1 DB queries
+// ─────────────────────────────────────────────
 let deviceMapCache = new Map();
 
 async function loadDeviceMap() {
   const { rows } = await pgPool.query(
-    "SELECT d.id, d.device_uid, d.vehicle_id FROM devices d WHERE d.device_uid IS NOT NULL"
+    "SELECT id, device_uid, vehicle_id FROM devices WHERE device_uid IS NOT NULL"
   );
-  deviceMapCache = new Map(rows.map(r => [r.device_uid, { pgDeviceId: r.id, pgVehicleId: r.vehicle_id }]));
+  deviceMapCache = new Map(
+    rows.map(r => [r.device_uid, { pgDeviceId: r.id, pgVehicleId: r.vehicle_id }])
+  );
   log("info", "Device cache loaded", { count: deviceMapCache.size });
 }
 
-/**
- * =========================
- * VEHICLE SYNC
- * Pull from MariaDB registration → upsert vehicles + devices in PG
- * =========================
- */
-export async function syncVehicles() {
-  let conn;
-  try {
-    conn = await mariaPool.getConnection();
-    log("info", "MariaDB connected for vehicle sync");
+// ─────────────────────────────────────────────
+// REDIS CACHE — latest position per device
+// Key: pos:{device_uid} (string uid for fast frontend lookup)
+// TTL: 5 minutes — auto-expires stale devices
+// ─────────────────────────────────────────────
+async function cacheLatestPositions(rows) {
+  if (!rows.length) return;
 
-    // MariaDB schema: registration(serial, reg_no, vmodel, pstatus)
-    // device table: (id, uniqueid) where uniqueid = '0' + serial
+  try {
+    const pipeline = redis.pipeline();
+
+    for (const row of rows) {
+      const uid = String(row.device_uid);
+      const key = `pos:${uid}`;
+
+      pipeline.hset(key, {
+        lat:       String(row.latitude  ?? 0),
+        lon:       String(row.longitude ?? 0),
+        speed:     String(row.speed_kph ?? 0),
+        heading:   String(row.heading   ?? 0),
+        time:      row.device_time  ? new Date(row.device_time).toISOString()  : "",
+        received:  row.received_at  ? new Date(row.received_at).toISOString()  : "",
+      });
+
+      pipeline.expire(key, 300); // 5 min TTL
+      pipeline.sadd("active_devices", uid);
+    }
+
+    await pipeline.exec();
+    log("info", "Redis cache updated", { count: rows.length });
+  } catch (e) {
+    log("warn", "Redis cache skipped", { error: e.message });
+  }
+}
+
+// ─────────────────────────────────────────────
+// STEP 1: VEHICLE SYNC
+// MariaDB registration → PostgreSQL vehicles + devices
+// ─────────────────────────────────────────────
+export async function syncVehicles() {
+  const conn = await getMariaConn();
+  try {
+    // Use both MariaDB schemas (registration + device)
+    // registration.unitid = the string uid (e.g. "010043685410")
     const rows = await conn.query(`
-      SELECT
-        r.serial,
-        r.reg_no,
-        r.vmodel,
-        r.pstatus,
-        d.uniqueid AS device_uid
+      SELECT 
+        r.id            AS maria_id,
+        r.numberplate   AS plate_number,
+        r.unitname      AS unit_name,
+        r.unitid        AS device_uid,
+        r.positionid    AS positionid,
+        r.accountid     AS account_id
       FROM registration r
-      LEFT JOIN device d ON d.uniqueid = CONCAT('0', r.serial)
-      WHERE r.serial IS NOT NULL AND r.serial != ''
-      LIMIT 5000
+      WHERE r.unitid IS NOT NULL AND r.unitid != ''
+      LIMIT 100000
     `);
 
-    let count = 0;
-    for (const r of rows) {
-      const serial = String(r.serial || "").trim();
-      if (!serial) continue;
+    let upserted = 0;
 
-      const plateNumber = String(r.reg_no || serial).substring(0, 30);
-
+    for (const row of rows) {
       try {
-        await pgPool.query(`
-          INSERT INTO vehicles (serial, plate_number, unit_name, model, status, created_at)
-          VALUES ($1, $2, $3, $4, $5, NOW())
-          ON CONFLICT (serial) DO UPDATE SET
+        // Trim plate_number to fit varchar(30)
+        const plate = String(row.plate_number || row.device_uid || "").substring(0, 30);
+
+        const vRes = await pgPool.query(`
+          INSERT INTO vehicles (id, plate_number, unit_name, serial, status, account_id)
+          VALUES ($1, $2, $3, $4, '00', $5)
+          ON CONFLICT (id) DO UPDATE SET
             plate_number = EXCLUDED.plate_number,
             unit_name    = EXCLUDED.unit_name,
-            model        = EXCLUDED.model,
-            status       = EXCLUDED.status
+            serial       = EXCLUDED.serial,
+            account_id   = EXCLUDED.account_id
+          RETURNING id
         `, [
-          serial,
-          plateNumber,
-          `Unit ${serial}`,
-          String(r.vmodel || ""),
-          String(r.pstatus || "inactive"),
+          N(row.maria_id),
+          plate,
+          row.unit_name,
+          row.device_uid,
+          N(row.account_id),
         ]);
 
-        if (r.device_uid) {
+        if (vRes.rows.length) {
           await pgPool.query(`
-            INSERT INTO devices (device_uid, serial, positionid)
-            VALUES ($1, $2, 0)
-            ON CONFLICT (device_uid) DO NOTHING
-          `, [String(r.device_uid), serial]);
+            INSERT INTO devices (device_uid, vehicle_id, positionid)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (device_uid) DO UPDATE SET
+              vehicle_id = EXCLUDED.vehicle_id,
+              positionid = CASE
+                WHEN EXCLUDED.positionid > devices.positionid
+                THEN EXCLUDED.positionid
+                ELSE devices.positionid
+              END
+          `, [
+            row.device_uid,
+            N(row.maria_id),
+            N(row.positionid) ?? 0,
+          ]);
 
-          // Link vehicle_id to device
-          await pgPool.query(`
-            UPDATE devices d
-            SET vehicle_id = v.id
-            FROM vehicles v
-            WHERE v.serial = $1
-              AND d.device_uid = $2
-              AND d.vehicle_id IS NULL
-          `, [serial, String(r.device_uid)]);
+          upserted++;
         }
-        count++;
       } catch { /* skip individual row */ }
     }
 
-    log("info", "Vehicle sync complete", { vehicles: count });
+    log("info", "Vehicle sync complete", { vehicles: upserted, total: rows.length });
   } catch (e) {
     log("error", "Vehicle sync failed", { error: e.message });
   } finally {
@@ -173,32 +210,35 @@ export async function syncVehicles() {
   }
 }
 
-/**
- * =========================
- * TELEMETRY + LATEST POSITIONS SYNC
- *
- * Strategy: servertime rolling window — NEVER gets stuck.
- * - Fetches all events from MariaDB in last 2h
- * - For each device: upsert latest_positions (1 row per device)
- * - Batch insert all rows into telemetry (historical)
- * =========================
- */
+// ─────────────────────────────────────────────
+// STEP 2: TELEMETRY SYNC
+//
+// KEY FIX: e.deviceid is a numeric FK to device.id (MariaDB internal)
+// We JOIN device d ON d.id = e.deviceid to get d.uniqueid
+// d.uniqueid = our devices.device_uid (the string "010043685410")
+//
+// Strategy: rolling 2h servertime window — never gets stuck
+// - latest_positions: 1 row per device (most recent)
+// - telemetry: all rows in window (historical)
+// - Redis: pipeline cache of latest per device (real-time layer)
+// ─────────────────────────────────────────────
 export async function syncTelemetry() {
-  let conn;
-  try {
-    conn = await mariaPool.getConnection();
-    log("info", "Maria connected (telemetry)");
+  const conn = await getMariaConn();
 
-    // Rolling 2-hour window — catches up even if sync was delayed
-    const since = new Date(Date.now() - 2 * 3600_000);
+  try {
+    // Rolling window: 2 hours back, or since last sync (whichever is earlier)
+    const since = lastSyncTime
+      ? new Date(Math.min(Date.now() - 2 * 3600_000, new Date(lastSyncTime).getTime()))
+      : new Date(Date.now() - 2 * 3600_000);
+
     const sinceStr = since.toISOString().slice(0, 19).replace("T", " ");
 
-    log("info", "Fetching latest positions per device", { since: sinceStr });
+    log("info", "Fetching events since", { since: sinceStr });
 
-    /**
-     * STEP A: Get ONE latest row per device (for latest_positions upsert)
-     * eventData.deviceid links to device.id, device.uniqueid = our device_uid
-     */
+    // ─────────────────────────────────────────
+    // QUERY A: ONE latest row per device (latest_positions + Redis)
+    // JOIN device to get uniqueid (string uid) — NOT the numeric deviceid
+    // ─────────────────────────────────────────
     const latestRows = await conn.query(`
       SELECT
         e.id            AS event_id,
@@ -209,7 +249,8 @@ export async function syncTelemetry() {
         e.course        AS heading,
         e.devicetime    AS device_time,
         e.servertime    AS received_at,
-        e.altitude
+        e.altitude,
+        e.alarmcode     AS event_type
       FROM eventData e
       INNER JOIN device d ON d.id = e.deviceid
       INNER JOIN (
@@ -225,11 +266,11 @@ export async function syncTelemetry() {
       LIMIT ?
     `, [sinceStr, DEVICE_BATCH]);
 
-    log("info", "Got latest rows from MariaDB", { count: latestRows.length });
+    log("info", "Latest rows from MariaDB", { count: latestRows.length });
 
-    /**
-     * STEP B: Get ALL rows in window (for telemetry table — historical)
-     */
+    // ─────────────────────────────────────────
+    // QUERY B: ALL rows in window (telemetry historical)
+    // ─────────────────────────────────────────
     const allRows = await conn.query(`
       SELECT
         e.id            AS event_id,
@@ -240,7 +281,8 @@ export async function syncTelemetry() {
         e.course        AS heading,
         e.devicetime    AS device_time,
         e.servertime    AS received_at,
-        e.altitude
+        e.altitude,
+        e.alarmcode     AS event_type
       FROM eventData e
       INNER JOIN device d ON d.id = e.deviceid
       WHERE e.servertime > ?
@@ -251,21 +293,21 @@ export async function syncTelemetry() {
       LIMIT ?
     `, [sinceStr, EVENTS_BATCH]);
 
-    log("info", "Got all telemetry rows from MariaDB", { count: allRows.length });
+    log("info", "All telemetry rows from MariaDB", { count: allRows.length });
 
-    /**
-     * STEP C: Upsert latest_positions — ONE ROW PER DEVICE, always most recent
-     */
     let posUpserted = 0;
+    let telInserted = 0;
+
+    // ─────────────────────────────────────────
+    // UPSERT latest_positions (1 row per device, always most recent)
+    // ─────────────────────────────────────────
     for (const row of latestRows) {
       const cached = deviceMapCache.get(String(row.device_uid));
       if (!cached) continue;
 
       const { pgDeviceId, pgVehicleId } = cached;
-      const eventId = N(row.event_id);
-      const lat     = N(row.latitude);
-      const lon     = N(row.longitude);
-
+      const lat = N(row.latitude);
+      const lon = N(row.longitude);
       if (lat === null || lon === null) continue;
 
       try {
@@ -298,11 +340,11 @@ export async function syncTelemetry() {
           N(row.altitude),
         ]);
 
-        // Update positionid checkpoint
+        // Advance positionid checkpoint
+        const eventId = N(row.event_id);
         if (eventId) {
           await pgPool.query(`
-            UPDATE devices SET positionid = GREATEST(positionid, $1)
-            WHERE id = $2
+            UPDATE devices SET positionid = GREATEST(positionid, $1) WHERE id = $2
           `, [eventId, pgDeviceId]);
         }
 
@@ -314,10 +356,15 @@ export async function syncTelemetry() {
 
     log("info", "latest_positions upserted", { count: posUpserted });
 
-    /**
-     * STEP D: Batch insert telemetry (historical rows, skip duplicates)
-     */
-    let telInserted = 0;
+    // ─────────────────────────────────────────
+    // REDIS pipeline — cache latest per device for real-time reads
+    // Frontend /api/positions/latest can read from Redis instead of PG
+    // ─────────────────────────────────────────
+    await cacheLatestPositions(latestRows);
+
+    // ─────────────────────────────────────────
+    // INSERT telemetry (historical, all rows, skip duplicates)
+    // ─────────────────────────────────────────
     for (const row of allRows) {
       const cached = deviceMapCache.get(String(row.device_uid));
       if (!cached) continue;
@@ -333,9 +380,9 @@ export async function syncTelemetry() {
         await pgPool.query(`
           INSERT INTO telemetry (
             device_id, vehicle_id, event_id, latitude, longitude,
-            speed_kph, heading, device_time, received_at, altitude
+            speed_kph, heading, device_time, received_at, altitude, event_type
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
           ON CONFLICT (device_id, event_id) DO NOTHING
         `, [
           pgDeviceId, pgVehicleId, eventId,
@@ -345,12 +392,15 @@ export async function syncTelemetry() {
           row.device_time,
           row.received_at,
           N(row.altitude),
+          String(row.event_type ?? ""),
         ]);
         telInserted++;
-      } catch { /* skip */ }
+      } catch { /* skip duplicate */ }
     }
 
-    log("info", "Telemetry sync done", { total: telInserted });
+    lastSyncTime = new Date().toISOString();
+
+    log("info", "Telemetry sync done", { telemetry: telInserted, latest: posUpserted });
 
   } catch (e) {
     log("error", "Telemetry sync failed", { error: e.message });
@@ -359,11 +409,27 @@ export async function syncTelemetry() {
   }
 }
 
-/**
- * =========================
- * MAIN SYNC ENTRY POINT
- * =========================
- */
+// ─────────────────────────────────────────────
+// MAIN SYNC (locked, single-instance)
+// ─────────────────────────────────────────────
+let isRunning = false;
+
+export async function runSync() {
+  if (isRunning) return;
+
+  isRunning = true;
+  const start = Date.now();
+  log("info", "MariaSync started");
+
+  try {
+    await syncTelemetry();
+    log("info", "MariaSync completed", { ms: Date.now() - start });
+  } finally {
+    isRunning = false;
+    log("info", `MariaSync done in ${((Date.now() - start) / 1000).toFixed(1)}s`);
+  }
+}
+
 export async function runMariaSync() {
   if (isSyncRunning) return;
 
@@ -387,4 +453,15 @@ export async function runMariaSync() {
     isSyncRunning = false;
     await releaseLock();
   }
+}
+
+// ─────────────────────────────────────────────
+// INIT (called by worker on startup)
+// ─────────────────────────────────────────────
+export async function initMariaSync() {
+  log("info", "MariaSync initializing...");
+  await syncVehicles();
+  await loadDeviceMap();
+  await syncTelemetry();
+  log("info", "MariaSync init complete");
 }
