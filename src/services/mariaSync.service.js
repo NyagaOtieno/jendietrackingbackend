@@ -85,7 +85,6 @@ async function releaseLock() {
 // ─────────────────────────────────────────────
 // DEVICE MAP CACHE
 // device_uid (string) → { pgDeviceId, pgVehicleId }
-// Loaded once per sync cycle — avoids N+1 DB queries
 // ─────────────────────────────────────────────
 let deviceMapCache = new Map();
 
@@ -101,32 +100,26 @@ async function loadDeviceMap() {
 
 // ─────────────────────────────────────────────
 // REDIS CACHE — latest position per device
-// Key: pos:{device_uid} (string uid for fast frontend lookup)
-// TTL: 5 minutes — auto-expires stale devices
+// TTL: 5 minutes
 // ─────────────────────────────────────────────
 async function cacheLatestPositions(rows) {
   if (!rows.length) return;
-
   try {
     const pipeline = redis.pipeline();
-
     for (const row of rows) {
       const uid = String(row.device_uid);
       const key = `pos:${uid}`;
-
       pipeline.hset(key, {
-        lat:       String(row.latitude  ?? 0),
-        lon:       String(row.longitude ?? 0),
-        speed:     String(row.speed_kph ?? 0),
-        heading:   String(row.heading   ?? 0),
-        time:      row.device_time  ? new Date(row.device_time).toISOString()  : "",
-        received:  row.received_at  ? new Date(row.received_at).toISOString()  : "",
+        lat:      String(row.latitude  ?? 0),
+        lon:      String(row.longitude ?? 0),
+        speed:    String(row.speed_kph ?? 0),
+        heading:  String(row.heading   ?? 0),
+        time:     row.device_time ? new Date(row.device_time).toISOString() : "",
+        received: row.received_at ? new Date(row.received_at).toISOString() : "",
       });
-
-      pipeline.expire(key, 300); // 5 min TTL
+      pipeline.expire(key, 300);
       pipeline.sadd("active_devices", uid);
     }
-
     await pipeline.exec();
     log("info", "Redis cache updated", { count: rows.length });
   } catch (e) {
@@ -136,70 +129,73 @@ async function cacheLatestPositions(rows) {
 
 // ─────────────────────────────────────────────
 // STEP 1: VEHICLE SYNC
-// MariaDB registration → PostgreSQL vehicles + devices
+// FIX: correct MariaDB column names
+// registration table has: serial, reg_no, vmodel, pstatus
+// device table joined via: uniqueid = CONCAT('0', serial)
 // ─────────────────────────────────────────────
 export async function syncVehicles() {
   const conn = await getMariaConn();
   try {
-    // Use both MariaDB schemas (registration + device)
-    // registration.unitid = the string uid (e.g. "010043685410")
     const rows = await conn.query(`
-      SELECT 
-        r.id            AS maria_id,
-        r.numberplate   AS plate_number,
-        r.unitname      AS unit_name,
-        r.unitid        AS device_uid,
-        r.positionid    AS positionid,
-        r.accountid     AS account_id
+      SELECT
+        r.serial,
+        r.reg_no,
+        r.vmodel,
+        r.pstatus,
+        d.uniqueid AS device_uid
       FROM registration r
-      WHERE r.unitid IS NOT NULL AND r.unitid != ''
-      LIMIT 100000
+      LEFT JOIN device d ON d.uniqueid = CONCAT('0', r.serial)
+      WHERE r.serial IS NOT NULL AND r.serial != ''
+      LIMIT 5000
     `);
 
     let upserted = 0;
 
     for (const row of rows) {
-      try {
-        // Trim plate_number to fit varchar(30)
-        const plate = String(row.plate_number || row.device_uid || "").substring(0, 30);
+      const serial = String(row.serial || "").trim();
+      if (!serial) continue;
 
-        const vRes = await pgPool.query(`
-          INSERT INTO vehicles (id, plate_number, unit_name, serial, status, account_id)
-          VALUES ($1, $2, $3, $4, '00', $5)
-          ON CONFLICT (id) DO UPDATE SET
+      // Trim plate to fit varchar(30)
+      const plate = String(row.reg_no || serial).substring(0, 30);
+
+      try {
+        await pgPool.query(`
+          INSERT INTO vehicles (serial, plate_number, unit_name, model, status, created_at)
+          VALUES ($1, $2, $3, $4, $5, NOW())
+          ON CONFLICT (serial) DO UPDATE SET
             plate_number = EXCLUDED.plate_number,
             unit_name    = EXCLUDED.unit_name,
-            serial       = EXCLUDED.serial,
-            account_id   = EXCLUDED.account_id
-          RETURNING id
+            model        = EXCLUDED.model,
+            status       = EXCLUDED.status
         `, [
-          N(row.maria_id),
+          serial,
           plate,
-          row.unit_name,
-          row.device_uid,
-          N(row.account_id),
+          `Unit ${serial}`,
+          String(row.vmodel || ""),
+          String(row.pstatus || "inactive"),
         ]);
 
-        if (vRes.rows.length) {
+        if (row.device_uid) {
           await pgPool.query(`
-            INSERT INTO devices (device_uid, vehicle_id, positionid)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (device_uid) DO UPDATE SET
-              vehicle_id = EXCLUDED.vehicle_id,
-              positionid = CASE
-                WHEN EXCLUDED.positionid > devices.positionid
-                THEN EXCLUDED.positionid
-                ELSE devices.positionid
-              END
-          `, [
-            row.device_uid,
-            N(row.maria_id),
-            N(row.positionid) ?? 0,
-          ]);
+            INSERT INTO devices (device_uid, serial, positionid)
+            VALUES ($1, $2, 0)
+            ON CONFLICT (device_uid) DO NOTHING
+          `, [String(row.device_uid), serial]);
 
-          upserted++;
+          // Link vehicle_id → device
+          await pgPool.query(`
+            UPDATE devices d
+            SET vehicle_id = v.id
+            FROM vehicles v
+            WHERE v.serial = $1
+              AND d.device_uid = $2
+              AND d.vehicle_id IS NULL
+          `, [serial, String(row.device_uid)]);
         }
-      } catch { /* skip individual row */ }
+        upserted++;
+      } catch (e) {
+        log("warn", "Vehicle row failed", { serial, error: e.message });
+      }
     }
 
     log("info", "Vehicle sync complete", { vehicles: upserted, total: rows.length });
@@ -213,20 +209,21 @@ export async function syncVehicles() {
 // ─────────────────────────────────────────────
 // STEP 2: TELEMETRY SYNC
 //
-// KEY FIX: e.deviceid is a numeric FK to device.id (MariaDB internal)
-// We JOIN device d ON d.id = e.deviceid to get d.uniqueid
-// d.uniqueid = our devices.device_uid (the string "010043685410")
+// FIX: insert columns match actual schema:
+//   latest_positions: device_id, latitude, longitude,
+//                     speed_kph, heading, device_time,
+//                     received_at, updated_at
+//   telemetry:        device_id, latitude, longitude,
+//                     speed_kph, heading, device_time,
+//                     received_at
 //
-// Strategy: rolling 2h servertime window — never gets stuck
-// - latest_positions: 1 row per device (most recent)
-// - telemetry: all rows in window (historical)
-// - Redis: pipeline cache of latest per device (real-time layer)
+// KEY: e.deviceid is numeric FK to device.id
+//      JOIN device d ON d.id = e.deviceid → d.uniqueid = our device_uid string
 // ─────────────────────────────────────────────
 export async function syncTelemetry() {
   const conn = await getMariaConn();
 
   try {
-    // Rolling window: 2 hours back, or since last sync (whichever is earlier)
     const since = lastSyncTime
       ? new Date(Math.min(Date.now() - 2 * 3600_000, new Date(lastSyncTime).getTime()))
       : new Date(Date.now() - 2 * 3600_000);
@@ -235,10 +232,7 @@ export async function syncTelemetry() {
 
     log("info", "Fetching events since", { since: sinceStr });
 
-    // ─────────────────────────────────────────
-    // QUERY A: ONE latest row per device (latest_positions + Redis)
-    // JOIN device to get uniqueid (string uid) — NOT the numeric deviceid
-    // ─────────────────────────────────────────
+    // ─── QUERY A: one latest row per device ───────────────────────────────
     const latestRows = await conn.query(`
       SELECT
         e.id            AS event_id,
@@ -248,9 +242,7 @@ export async function syncTelemetry() {
         e.speed         AS speed_kph,
         e.course        AS heading,
         e.devicetime    AS device_time,
-        e.servertime    AS received_at,
-        e.altitude,
-        e.alarmcode     AS event_type
+        e.servertime    AS received_at
       FROM eventData e
       INNER JOIN device d ON d.id = e.deviceid
       INNER JOIN (
@@ -268,9 +260,7 @@ export async function syncTelemetry() {
 
     log("info", "Latest rows from MariaDB", { count: latestRows.length });
 
-    // ─────────────────────────────────────────
-    // QUERY B: ALL rows in window (telemetry historical)
-    // ─────────────────────────────────────────
+    // ─── QUERY B: all rows in window (historical telemetry) ───────────────
     const allRows = await conn.query(`
       SELECT
         e.id            AS event_id,
@@ -280,9 +270,7 @@ export async function syncTelemetry() {
         e.speed         AS speed_kph,
         e.course        AS heading,
         e.devicetime    AS device_time,
-        e.servertime    AS received_at,
-        e.altitude,
-        e.alarmcode     AS event_type
+        e.servertime    AS received_at
       FROM eventData e
       INNER JOIN device d ON d.id = e.deviceid
       WHERE e.servertime > ?
@@ -298,14 +286,14 @@ export async function syncTelemetry() {
     let posUpserted = 0;
     let telInserted = 0;
 
-    // ─────────────────────────────────────────
-    // UPSERT latest_positions (1 row per device, always most recent)
-    // ─────────────────────────────────────────
+    // ─── UPSERT latest_positions ──────────────────────────────────────────
+    // Schema: device_id, latitude, longitude, speed_kph, heading,
+    //         device_time, received_at, updated_at
     for (const row of latestRows) {
       const cached = deviceMapCache.get(String(row.device_uid));
       if (!cached) continue;
 
-      const { pgDeviceId, pgVehicleId } = cached;
+      const { pgDeviceId } = cached;
       const lat = N(row.latitude);
       const lon = N(row.longitude);
       if (lat === null || lon === null) continue;
@@ -313,31 +301,28 @@ export async function syncTelemetry() {
       try {
         await pgPool.query(`
           INSERT INTO latest_positions (
-            device_id, vehicle_id, latitude, longitude,
-            speed_kph, heading, device_time, received_at,
-            altitude, updated_at
+            device_id, latitude, longitude,
+            speed_kph, heading, device_time, received_at, updated_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
           ON CONFLICT (device_id) DO UPDATE SET
-            vehicle_id  = EXCLUDED.vehicle_id,
             latitude    = EXCLUDED.latitude,
             longitude   = EXCLUDED.longitude,
             speed_kph   = EXCLUDED.speed_kph,
             heading     = EXCLUDED.heading,
             device_time = EXCLUDED.device_time,
             received_at = EXCLUDED.received_at,
-            altitude    = EXCLUDED.altitude,
             updated_at  = NOW()
           WHERE EXCLUDED.device_time >= latest_positions.device_time
              OR latest_positions.device_time IS NULL
         `, [
-          pgDeviceId, pgVehicleId,
-          lat, lon,
+          pgDeviceId,
+          lat,
+          lon,
           N(row.speed_kph) ?? 0,
           N(row.heading)   ?? 0,
           row.device_time,
           row.received_at,
-          N(row.altitude),
         ]);
 
         // Advance positionid checkpoint
@@ -356,46 +341,43 @@ export async function syncTelemetry() {
 
     log("info", "latest_positions upserted", { count: posUpserted });
 
-    // ─────────────────────────────────────────
-    // REDIS pipeline — cache latest per device for real-time reads
-    // Frontend /api/positions/latest can read from Redis instead of PG
-    // ─────────────────────────────────────────
+    // ─── REDIS pipeline ───────────────────────────────────────────────────
     await cacheLatestPositions(latestRows);
 
-    // ─────────────────────────────────────────
-    // INSERT telemetry (historical, all rows, skip duplicates)
-    // ─────────────────────────────────────────
+    // ─── INSERT telemetry ─────────────────────────────────────────────────
+    // Schema: device_id, latitude, longitude, speed_kph, heading,
+    //         device_time, received_at
+    // NOTE: no event_id unique constraint in schema → use received_at dedup
     for (const row of allRows) {
       const cached = deviceMapCache.get(String(row.device_uid));
       if (!cached) continue;
 
-      const { pgDeviceId, pgVehicleId } = cached;
-      const eventId = N(row.event_id);
-      const lat     = N(row.latitude);
-      const lon     = N(row.longitude);
-
-      if (lat === null || lon === null || !eventId) continue;
+      const { pgDeviceId } = cached;
+      const lat = N(row.latitude);
+      const lon = N(row.longitude);
+      if (lat === null || lon === null) continue;
 
       try {
         await pgPool.query(`
           INSERT INTO telemetry (
-            device_id, vehicle_id, event_id, latitude, longitude,
-            speed_kph, heading, device_time, received_at, altitude, event_type
+            device_id, latitude, longitude,
+            speed_kph, heading, device_time, received_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-          ON CONFLICT (device_id, event_id) DO NOTHING
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT DO NOTHING
         `, [
-          pgDeviceId, pgVehicleId, eventId,
-          lat, lon,
+          pgDeviceId,
+          lat,
+          lon,
           N(row.speed_kph) ?? 0,
           N(row.heading)   ?? 0,
           row.device_time,
           row.received_at,
-          N(row.altitude),
-          String(row.event_type ?? ""),
         ]);
         telInserted++;
-      } catch { /* skip duplicate */ }
+      } catch (e) {
+        log("warn", "telemetry insert failed", { uid: row.device_uid, error: e.message });
+      }
     }
 
     lastSyncTime = new Date().toISOString();
@@ -416,11 +398,9 @@ let isRunning = false;
 
 export async function runSync() {
   if (isRunning) return;
-
   isRunning = true;
   const start = Date.now();
   log("info", "MariaSync started");
-
   try {
     await syncTelemetry();
     log("info", "MariaSync completed", { ms: Date.now() - start });
