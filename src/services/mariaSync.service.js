@@ -5,6 +5,7 @@ dotenv.config();
 import { createPool } from "mariadb";
 import { pgPool } from "../config/db.js";
 import { redis } from "../config/redis.js";
+import { runMariaSync, syncVehicles, loadDeviceMap } from "../services/mariaSync.service.js";
 
 // ─────────────────────────────────────────────
 // LOGGER
@@ -27,9 +28,11 @@ export const mariaPool = createPool({
   user:            process.env.MARIADB_USER     || process.env.MARIA_DB_USER     || "root",
   password:        process.env.MARIADB_PASSWORD || process.env.MARIA_DB_PASSWORD || "nairobiyetu",
   database:        process.env.MARIADB_DATABASE || process.env.MARIA_DB_NAME     || "uradi",
-  connectionLimit: 5,
-  connectTimeout:  20000,
-  acquireTimeout:  20000,
+   
+  connectionLimit: 15,
+  acquireTimeout: 60000,
+  connectTimeout: 30000,
+  idleTimeout: 30000,
 });
 
 // ─────────────────────────────────────────────

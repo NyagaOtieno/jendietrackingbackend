@@ -30,7 +30,7 @@ import syncRoutes from "./routes/sync.routes.js";
 import telemetryRoutes from "./routes/telemetry.routes.js";
 import usersRoutes from "./routes/users.routes.js";
 
-await initDb();
+
 
 app.use((req, res, next) => {
   const blocked = [".env", ".git", ".bash_history", "config.js"];
@@ -48,6 +48,7 @@ const app = express();
 const server = http.createServer(app);
 const io = initWebSocket(server);
 
+await initDb();
 global.io = io;
 
 /**

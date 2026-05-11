@@ -2,10 +2,14 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import { initDb, initMariaDB } from "../config/initDb.js";
-import { runMariaSync, syncVehicles } from "../services/mariaSync.service.js";
+import {
+  runMariaSync,
+  syncVehicles,
+  loadDeviceMap,
+} from "../services/mariaSync.service.js";
 
-const SYNC_INTERVAL = Number(process.env.SYNC_INTERVAL || 60_000); // 1 minute
-const VEHICLE_SYNC_INTERVAL = 30 * 60_000; // 30 minutes
+const SYNC_INTERVAL = Number(process.env.SYNC_INTERVAL || 60_000); // 1 min
+const VEHICLE_SYNC_INTERVAL = 30 * 60_000; // 30 min
 
 let isRunning = false;
 let vehicleSyncRunning = false;
@@ -17,8 +21,8 @@ let vehicleSyncRunning = false;
  */
 async function runSafe() {
   if (isRunning) return;
-
   isRunning = true;
+
   try {
     await runMariaSync();
   } catch (e) {
@@ -35,14 +39,34 @@ async function runSafe() {
  */
 async function runVehicleSync() {
   if (vehicleSyncRunning) return;
-
   vehicleSyncRunning = true;
+
   try {
     await syncVehicles();
+    await loadDeviceMap(); // 🔥 CRITICAL
   } catch (e) {
     console.error("[Worker] Vehicle sync failed:", e.message);
   } finally {
     vehicleSyncRunning = false;
+  }
+}
+
+/**
+ * =========================
+ * LOOP HELPERS (NO setInterval)
+ * =========================
+ */
+async function telemetryLoop() {
+  while (true) {
+    await runSafe();
+    await new Promise(r => setTimeout(r, SYNC_INTERVAL));
+  }
+}
+
+async function vehicleLoop() {
+  while (true) {
+    await runVehicleSync();
+    await new Promise(r => setTimeout(r, VEHICLE_SYNC_INTERVAL));
   }
 }
 
@@ -59,31 +83,29 @@ async function start() {
   await initMariaDB().catch(() => {});
 
   console.log("[Worker] ✅ Telemetry worker started");
-  console.log(`[Worker] ⚡ Sync every ${SYNC_INTERVAL / 1000}s`);
+  console.log(`[Worker] ⚡ Telemetry every ${SYNC_INTERVAL / 1000}s`);
+  console.log(`[Worker] 🚗 Vehicle sync every ${VEHICLE_SYNC_INTERVAL / 60000} min`);
 
   /**
-   * Vehicle sync on startup
+   * INITIAL LOAD (VERY IMPORTANT)
    */
   try {
-    await runVehicleSync();
+    await syncVehicles();
+    await loadDeviceMap(); // 🔥 ensures telemetry works immediately
   } catch (e) {
     console.error("[Worker] Initial vehicle sync failed:", e.message);
   }
 
   /**
-   * Vehicle sync interval
-   */
-  setInterval(runVehicleSync, VEHICLE_SYNC_INTERVAL);
-
-  /**
-   * Telemetry sync (first run immediate)
+   * FIRST TELEMETRY RUN
    */
   await runSafe();
 
   /**
-   * Telemetry interval
+   * START LOOPS (NON-BLOCKING)
    */
-  setInterval(runSafe, SYNC_INTERVAL);
+  telemetryLoop();
+  vehicleLoop();
 }
 
 /**
