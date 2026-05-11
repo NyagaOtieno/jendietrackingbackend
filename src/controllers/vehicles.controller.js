@@ -1,59 +1,44 @@
+// src/controllers/vehicles.controller.js
 import { query } from "../config/db.js";
 import { isPrivilegedRole } from "../middleware/auth.js";
 
-// ======================================================
-// HELPERS
-// ======================================================
-function getUser(req) {
-  return req?.user || {};
-}
-
-function canAccessAllVehicles(req) {
-  return isPrivilegedRole(req?.user?.role);
-}
-
-function getAccountId(req) {
-  return req?.user?.accountId ?? null;
-}
-
-function isValidId(id) {
-  return id !== undefined && id !== null && id !== "";
-}
-
+function canAccessAllVehicles(req) { return isPrivilegedRole(req?.user?.role); }
+function getAccountId(req)         { return req?.user?.accountId ?? null; }
+function isValidId(id)             { return id !== undefined && id !== null && id !== ""; }
 function isValidYear(year) {
-  return (
-    typeof year === "number" &&
-    year >= 1900 &&
-    year <= new Date().getFullYear() + 1
-  );
+  return typeof year === "number" && year >= 1900 && year <= new Date().getFullYear() + 1;
 }
 
-// ======================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // GET ALL VEHICLES
-// ======================================================
+//
+// ✅ FIX: the previous version pushed `safeLimit, offset` into `params`
+//   inside the non-privileged branch (it should have pushed `accountId`),
+//   then pushed `limit, offset` again at the end.  That made the WHERE
+//   clause use `safeLimit` as the account_id value, so non-admin users
+//   always got 0 results (or the wrong results).
+//
+//   Fixed param array construction — accountId goes in at $1, then
+//   LIMIT / OFFSET at the end.
+// ─────────────────────────────────────────────────────────────────────────────
 export async function getVehicles(req, res) {
   try {
     const isPrivileged = canAccessAllVehicles(req);
-    const accountId = getAccountId(req);
+    const accountId    = getAccountId(req);
 
-    // =========================
-    // PAGINATION INPUTS
-    // =========================
-    const limit = parseInt(req.query.limit || "100000");
-    const safeLimit = Number.isFinite(limit) ? limit : 100000;
+    const limit  = Math.min(Math.max(parseInt(req.query.limit  || "100000"), 1), 100000);
     const offset = Math.max(parseInt(req.query.offset || "0"), 0);
 
-    // =========================
-    // BASE QUERY
-    // =========================
+    // ── Build query ──────────────────────────────────────────────────────────
+    const params = [];
     let sql = `
       SELECT
         v.id,
         v.plate_number,
         COALESCE(v.unit_name, '') AS unit_name,
-        COALESCE(v.make, '') AS make,
-        COALESCE(v.model, '') AS model,
-        COALESCE(v.year, 0) AS year,
+        COALESCE(v.make,  '')     AS make,
+        COALESCE(v.model, '')     AS model,
+        COALESCE(v.year,  0)      AS year,
         v.status,
         v.created_at,
         v.serial,
@@ -61,40 +46,26 @@ export async function getVehicles(req, res) {
       FROM vehicles v
     `;
 
-    const params = [];
-
-    // =========================
-    // ACCOUNT FILTERING
-    // =========================
+    // ✅ FIX: push accountId (not limit/offset) into params here
     if (!isPrivileged) {
       if (!accountId) {
-        return res.status(401).json({
-          success: false,
-          message: "Missing account context for user",
-        });
+        return res.status(401).json({ success: false, message: "Missing account context" });
       }
-
       sql += ` WHERE v.account_id = $1 `;
-      params.push(safeLimit, offset);
+      params.push(accountId); // $1 = accountId
     }
 
-    // =========================
-    // COUNT QUERY (for frontend pagination)
-    // =========================
+    // LIMIT / OFFSET always go last
+    sql += ` ORDER BY v.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+
+    // ── Count query ──────────────────────────────────────────────────────────
     let countSql = `SELECT COUNT(*) FROM vehicles v`;
     const countParams = [];
-
     if (!isPrivileged) {
       countSql += ` WHERE v.account_id = $1 `;
       countParams.push(accountId);
     }
-
-    // =========================
-    // FINAL SORT + PAGINATION
-    // =========================
-    sql += ` ORDER BY v.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-
-    params.push(limit, offset);
 
     const [result, countResult] = await Promise.all([
       query(sql, params),
@@ -103,340 +74,143 @@ export async function getVehicles(req, res) {
 
     return res.json({
       success: true,
-      data: result.rows,
-      total: parseInt(countResult.rows[0].count),
+      data:    result.rows,
+      total:   parseInt(countResult.rows[0].count),
       limit,
       offset,
     });
   } catch (error) {
     console.error("getVehicles error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to load vehicles",
-    });
+    return res.status(500).json({ success: false, message: "Failed to load vehicles" });
   }
 }
-// ======================================================
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET VEHICLE BY ID
-// ======================================================
+// ─────────────────────────────────────────────────────────────────────────────
 export async function getVehicleById(req, res) {
   try {
     const { id } = req.params;
-
-    if (!isValidId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid vehicle id",
-      });
-    }
+    if (!isValidId(id)) return res.status(400).json({ success: false, message: "Invalid vehicle id" });
 
     const isPrivileged = canAccessAllVehicles(req);
-    const accountId = getAccountId(req);
+    const accountId    = getAccountId(req);
 
-    let sql = `
-      SELECT *
-      FROM vehicles
-      WHERE id = $1
-    `;
-
+    let sql    = `SELECT * FROM vehicles WHERE id = $1`;
     const params = [id];
 
     if (!isPrivileged) {
-      if (!accountId) {
-        return res.status(401).json({
-          success: false,
-          message: "Missing account context",
-        });
-      }
-
-      sql += ` AND account_id = $2 `;
+      if (!accountId) return res.status(401).json({ success: false, message: "Missing account context" });
+      sql += ` AND account_id = $2`;
       params.push(accountId);
     }
 
     const result = await query(sql, params);
+    if (!result.rows.length) return res.status(404).json({ success: false, message: "Vehicle not found" });
 
-    if (!result.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Vehicle not found",
-      });
-    }
-
-    return res.json({
-      success: true,
-      data: result.rows[0],
-    });
+    return res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error("getVehicleById error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to load vehicle",
-    });
+    return res.status(500).json({ success: false, message: "Failed to load vehicle" });
   }
 }
 
-// ======================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // CREATE VEHICLE
-// ======================================================
+// ─────────────────────────────────────────────────────────────────────────────
 export async function createVehicle(req, res) {
   try {
-    const {
-      plate_number,
-      unit_name,
-      make,
-      model,
-      year,
-      account_id,
-      status = "active",
-      serial,
-    } = req.body;
+    const { plate_number, unit_name, make, model, year, account_id, status = "active", serial } = req.body;
 
-    if (!plate_number) {
-      return res.status(400).json({
-        success: false,
-        message: "plate_number is required",
-      });
-    }
+    if (!plate_number) return res.status(400).json({ success: false, message: "plate_number is required" });
+    if (year !== undefined && !isValidYear(year))
+      return res.status(400).json({ success: false, message: "Invalid vehicle year" });
 
-    if (year !== undefined && !isValidYear(year)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid vehicle year",
-      });
-    }
-
-    const isPrivileged = canAccessAllVehicles(req);
+    const isPrivileged  = canAccessAllVehicles(req);
     const userAccountId = getAccountId(req);
-
-    let finalAccountId;
+    let   finalAccountId;
 
     if (isPrivileged) {
-      if (!account_id) {
-        return res.status(400).json({
-          success: false,
-          message: "account_id is required for privileged users",
-        });
-      }
-
-      const accCheck = await query(
-        `SELECT id FROM accounts WHERE id = $1 LIMIT 1`,
-        [account_id]
-      );
-
-      if (!accCheck.rows.length) {
-        return res.status(404).json({
-          success: false,
-          message: "Account not found",
-        });
-      }
-
+      if (!account_id) return res.status(400).json({ success: false, message: "account_id is required" });
+      const accCheck = await query(`SELECT id FROM accounts WHERE id = $1 LIMIT 1`, [account_id]);
+      if (!accCheck.rows.length) return res.status(404).json({ success: false, message: "Account not found" });
       finalAccountId = account_id;
     } else {
-      if (!userAccountId) {
-        return res.status(400).json({
-          success: false,
-          message: "Account context missing",
-        });
-      }
-
+      if (!userAccountId) return res.status(400).json({ success: false, message: "Account context missing" });
       finalAccountId = userAccountId;
     }
 
     const result = await query(
-      `
-      INSERT INTO vehicles (
-        plate_number,
-        unit_name,
-        make,
-        model,
-        year,
-        account_id,
-        status,
-        serial
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-      RETURNING *
-      `,
-      [
-        plate_number,
-        unit_name,
-        make,
-        model,
-        year,
-        finalAccountId,
-        status,
-        serial,
-      ]
+      `INSERT INTO vehicles (plate_number, unit_name, make, model, year, account_id, status, serial)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [plate_number, unit_name, make, model, year, finalAccountId, status, serial]
     );
 
-    return res.status(201).json({
-      success: true,
-      data: result.rows[0],
-    });
+    return res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error("createVehicle error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to create vehicle",
-    });
+    return res.status(500).json({ success: false, message: "Failed to create vehicle" });
   }
 }
 
-// ======================================================
-// UPDATE VEHICLE (IMPROVED SAFE VERSION)
-// ======================================================
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATE VEHICLE
+// ─────────────────────────────────────────────────────────────────────────────
 export async function updateVehicle(req, res) {
   try {
-    const { id } = req.params;
+    const { id }                = req.params;
     const { make, model, year, account_id } = req.body;
 
-    if (!isValidId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid vehicle id",
-      });
-    }
+    if (!isValidId(id)) return res.status(400).json({ success: false, message: "Invalid vehicle id" });
 
-    const numericYear =
-      year !== undefined && year !== null ? Number(year) : null;
+    const numericYear = year != null ? Number(year) : null;
+    if (numericYear !== null && (Number.isNaN(numericYear) || numericYear < 1900 || numericYear > new Date().getFullYear() + 1))
+      return res.status(400).json({ success: false, message: "Invalid vehicle year" });
 
-    if (numericYear !== null && Number.isNaN(numericYear)) {
-      return res.status(400).json({
-        success: false,
-        message: "Year must be a number",
-      });
-    }
-
-    if (
-      numericYear !== null &&
-      (numericYear < 1900 ||
-        numericYear > new Date().getFullYear() + 1)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid vehicle year",
-      });
-    }
-
-    const existing = await query(
-      `SELECT * FROM vehicles WHERE id = $1`,
-      [id]
-    );
-
-    if (!existing.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Vehicle not found",
-      });
-    }
-
-    const vehicle = existing.rows[0];
-
-    let finalAccountId = vehicle.account_id;
-
-    if (account_id) {
-      finalAccountId = account_id;
-    }
+    const existing = await query(`SELECT * FROM vehicles WHERE id = $1`, [id]);
+    if (!existing.rows.length) return res.status(404).json({ success: false, message: "Vehicle not found" });
 
     const result = await query(
-      `
-      UPDATE vehicles
-      SET
-        make = COALESCE($1, make),
-        model = COALESCE($2, model),
-        year = COALESCE($3, year),
-        account_id = COALESCE($4, account_id)
-      WHERE id = $5
-      RETURNING *
-      `,
-      [
-        make ?? null,
-        model ?? null,
-        numericYear ?? null,
-        finalAccountId ?? null,
-        id,
-      ]
+      `UPDATE vehicles
+       SET make = COALESCE($1, make), model = COALESCE($2, model),
+           year = COALESCE($3, year), account_id = COALESCE($4, account_id)
+       WHERE id = $5 RETURNING *`,
+      [make ?? null, model ?? null, numericYear ?? null, account_id ?? null, id]
     );
 
-    console.log("Vehicle updated:", {
-      vehicleId: id,
-      updatedBy: req.user?.id,
-      role: req.user?.role,
-      accountId: req.user?.accountId,
-    });
-
-    return res.json({
-      success: true,
-      data: result.rows[0],
-    });
+    return res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error("updateVehicle error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update vehicle",
-    });
+    return res.status(500).json({ success: false, message: "Failed to update vehicle" });
   }
 }
 
-// ======================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // DELETE VEHICLE
-// ======================================================
+// ─────────────────────────────────────────────────────────────────────────────
 export async function deleteVehicle(req, res) {
   try {
-    const { id } = req.params;
-
+    const { id }       = req.params;
     const isPrivileged = canAccessAllVehicles(req);
-    const accountId = getAccountId(req);
+    const accountId    = getAccountId(req);
 
-    if (!isValidId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid vehicle id",
-      });
-    }
+    if (!isValidId(id)) return res.status(400).json({ success: false, message: "Invalid vehicle id" });
 
-    let sql = `
-      DELETE FROM vehicles
-      WHERE id = $1
-    `;
-
+    let sql    = `DELETE FROM vehicles WHERE id = $1`;
     const params = [id];
 
     if (!isPrivileged) {
-      if (!accountId) {
-        return res.status(401).json({
-          success: false,
-          message: "Missing account context",
-        });
-      }
-
-      sql += ` AND account_id = $2 `;
+      if (!accountId) return res.status(401).json({ success: false, message: "Missing account context" });
+      sql += ` AND account_id = $2`;
       params.push(accountId);
     }
 
     const result = await query(sql + " RETURNING id", params);
+    if (!result.rows.length) return res.status(404).json({ success: false, message: "Vehicle not found" });
 
-    if (!result.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Vehicle not found",
-      });
-    }
-
-    return res.json({
-      success: true,
-      message: "Vehicle deleted",
-    });
+    return res.json({ success: true, message: "Vehicle deleted" });
   } catch (error) {
     console.error("deleteVehicle error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to delete vehicle",
-    });
+    return res.status(500).json({ success: false, message: "Failed to delete vehicle" });
   }
 }

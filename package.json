@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "worker": "node src/workers/telemetryBufferWorker.js",
+    "dev:worker": "node --watch src/workers/telemetryBufferWorker.js",
     "migrate": "node src/scripts/migrate.js",
     "seed:admin": "node src/scripts/seedAdmin.js",
     "seed:all": "node src/scripts/seedAll.js",
