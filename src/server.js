@@ -32,6 +32,13 @@ import usersRoutes from "./routes/users.routes.js";
 
 await initDb();
 
+app.use((req, res, next) => {
+  const blocked = [".env", ".git", ".bash_history", "config.js"];
+  if (blocked.some(p => req.url.includes(p))) {
+    return res.status(403).send("Forbidden");
+  }
+  next();
+});
 /**
  * =========================
  * APP + SERVER
