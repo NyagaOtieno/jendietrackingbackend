@@ -26,28 +26,26 @@ function isPrivileged(req) {
 // ─────────────────────────────────────────────
 // LATEST POSITIONS QUERY
 // ─────────────────────────────────────────────
-async function loadLatestFromDb(req) {
+async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
   const params = [];
 
   let sql = `
     SELECT
       d.device_uid AS "deviceUid",
-      d.id AS "deviceId",
-      lp.latitude AS lat,
+      d.id         AS "deviceId",
+      lp.latitude  AS lat,
       lp.longitude AS lon,
       COALESCE(lp.speed_kph, 0) AS "speedKph",
       lp.heading,
-      lp.device_time AS "deviceTime",
-      lp.received_at AS "receivedAt",
-
-      COALESCE(v.id, 0) AS "vehicleId",
-      COALESCE(v.plate_number, '') AS "plateNumber",
-      COALESCE(v.unit_name, '') AS "unitName",
-      COALESCE(v.account_id, 0) AS "accountId"
-
+      lp.device_time  AS "deviceTime",
+      lp.received_at  AS "receivedAt",
+      COALESCE(v.id, 0)           AS "vehicleId",
+      COALESCE(v.plate_number,'') AS "plateNumber",
+      COALESCE(v.unit_name,'')    AS "unitName",
+      COALESCE(v.account_id, 0)   AS "accountId"
     FROM latest_positions lp
-    LEFT JOIN devices d ON d.id = lp.device_id
-    LEFT JOIN vehicles v ON v.id = d.vehicle_id
+    LEFT JOIN devices  d ON d.id  = lp.device_id
+    LEFT JOIN vehicles v ON v.id  = d.vehicle_id
   `;
 
   if (!isPrivileged(req)) {
@@ -56,10 +54,78 @@ async function loadLatestFromDb(req) {
     params.push(accId);
   }
 
-  sql += ` ORDER BY lp.received_at DESC LIMIT 1000`;
+  // Paginate: caller controls page size (max 10 000 to protect the DB)
+  const safeLimit  = Math.min(Math.max(parseInt(limit)  || 5000, 1), 10_000);
+  const safeOffset = Math.max(parseInt(offset) || 0, 0);
+
+  sql += ` ORDER BY lp.received_at DESC
+           LIMIT  $${params.length + 1}
+           OFFSET $${params.length + 2}`;
+  params.push(safeLimit, safeOffset);
 
   const result = await query(sql, params);
   return result.rows || [];
+}
+
+// ─────────────────────────────────────────────
+// SINGLE-VEHICLE LATEST POSITION
+// Called when the user selects a vehicle that is not in the current batch.
+// Tries latest_positions first (fast); falls back to telemetry (most recent row).
+// ─────────────────────────────────────────────
+async function loadVehicleLatestFromDb(req, vehicleId) {
+  const vId = Number(vehicleId);
+  if (!vId) return null;
+
+  // Attempt 1: latest_positions (one row per device, fastest)
+  const lpSql = `
+    SELECT
+      d.device_uid AS "deviceUid",
+      d.id         AS "deviceId",
+      lp.latitude  AS lat,
+      lp.longitude AS lon,
+      COALESCE(lp.speed_kph, 0) AS "speedKph",
+      lp.heading,
+      lp.device_time  AS "deviceTime",
+      lp.received_at  AS "receivedAt",
+      v.id                      AS "vehicleId",
+      COALESCE(v.plate_number,'') AS "plateNumber",
+      COALESCE(v.unit_name,'')    AS "unitName",
+      COALESCE(v.account_id, 0)   AS "accountId"
+    FROM latest_positions lp
+    INNER JOIN devices  d ON d.id  = lp.device_id
+    INNER JOIN vehicles v ON v.id  = d.vehicle_id
+    WHERE v.id = $1
+    LIMIT 1
+  `;
+
+  const lpResult = await query(lpSql, [vId]);
+  if (lpResult.rows.length) return lpResult.rows[0];
+
+  // Attempt 2: fall back to telemetry (most recent record for this vehicle)
+  const telSql = `
+    SELECT
+      d.device_uid AS "deviceUid",
+      d.id         AS "deviceId",
+      t.latitude   AS lat,
+      t.longitude  AS lon,
+      COALESCE(t.speed_kph, 0) AS "speedKph",
+      t.heading,
+      t.device_time  AS "deviceTime",
+      t.received_at  AS "receivedAt",
+      v.id                      AS "vehicleId",
+      COALESCE(v.plate_number,'') AS "plateNumber",
+      COALESCE(v.unit_name,'')    AS "unitName",
+      COALESCE(v.account_id, 0)   AS "accountId"
+    FROM telemetry t
+    INNER JOIN devices  d ON d.id  = t.device_id
+    INNER JOIN vehicles v ON v.id  = d.vehicle_id
+    WHERE v.id = $1
+    ORDER BY t.received_at DESC
+    LIMIT 1
+  `;
+
+  const telResult = await query(telSql, [vId]);
+  return telResult.rows[0] || null;
 }
 
 // ─────────────────────────────────────────────
@@ -118,7 +184,8 @@ async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
 // ─────────────────────────────────────────────
 export async function getLatestPositions(req, res) {
   try {
-    const rows = await loadLatestFromDb(req);
+    const { limit = 5000, offset = 0 } = req.query;
+    const rows = await loadLatestFromDb(req, { limit, offset });
 
     return res.json({
       success: true,
@@ -130,6 +197,31 @@ export async function getLatestPositions(req, res) {
     return res.status(500).json({
       success: false,
       message: "Failed to load latest positions",
+    });
+  }
+}
+
+// ─────────────────────────────────────────────
+// GET SINGLE VEHICLE LATEST POSITION
+// ─────────────────────────────────────────────
+export async function getVehicleLatestPosition(req, res) {
+  try {
+    const { vehicleId } = req.params;
+    const row = await loadVehicleLatestFromDb(req, vehicleId);
+
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        message: "No position found for this vehicle",
+      });
+    }
+
+    return res.json({ success: true, data: row });
+  } catch (err) {
+    console.error("getVehicleLatestPosition error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load vehicle position",
     });
   }
 }
