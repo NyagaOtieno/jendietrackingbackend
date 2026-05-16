@@ -28,10 +28,12 @@ export async function getVehicles(req, res) {
 
     const limit  = Math.min(Math.max(parseInt(req.query.limit  || "100000"), 1), 100000);
     const offset = Math.max(parseInt(req.query.offset || "0"), 0);
+    const search = (req.query.search || "").toString().trim();
 
-    // ── Build query ──────────────────────────────────────────────────────────
-    const params = [];
-    let sql = `
+    const params      = [];
+    const countParams = [];
+
+    let sql      = `
       SELECT
         v.id,
         v.plate_number,
@@ -44,28 +46,34 @@ export async function getVehicles(req, res) {
         v.serial,
         v.account_id
       FROM vehicles v
+      WHERE 1=1
     `;
+    let countSql = `SELECT COUNT(*) FROM vehicles v WHERE 1=1`;
 
-    // ✅ FIX: push accountId (not limit/offset) into params here
+    // Account filter
     if (!isPrivileged) {
       if (!accountId) {
         return res.status(401).json({ success: false, message: "Missing account context" });
       }
-      sql += ` WHERE v.account_id = $1 `;
-      params.push(accountId); // $1 = accountId
+      params.push(accountId);
+      countParams.push(accountId);
+      sql      += ` AND v.account_id = $${params.length}`;
+      countSql += ` AND v.account_id = $${countParams.length}`;
     }
 
-    // LIMIT / OFFSET always go last
+    // Search — plate_number, unit_name, serial (case-insensitive)
+    if (search) {
+      const like = `%${search}%`;
+      params.push(like);
+      countParams.push(like);
+      const i  = params.length;
+      const ci = countParams.length;
+      sql      += ` AND (v.plate_number ILIKE $${i} OR v.unit_name ILIKE $${i} OR v.serial ILIKE $${i})`;
+      countSql += ` AND (v.plate_number ILIKE $${ci} OR v.unit_name ILIKE $${ci} OR v.serial ILIKE $${ci})`;
+    }
+
     sql += ` ORDER BY v.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     params.push(limit, offset);
-
-    // ── Count query ──────────────────────────────────────────────────────────
-    let countSql = `SELECT COUNT(*) FROM vehicles v`;
-    const countParams = [];
-    if (!isPrivileged) {
-      countSql += ` WHERE v.account_id = $1 `;
-      countParams.push(accountId);
-    }
 
     const [result, countResult] = await Promise.all([
       query(sql, params),
