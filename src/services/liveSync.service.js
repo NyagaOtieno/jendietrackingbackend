@@ -1,14 +1,6 @@
 // src/services/liveSync.service.js
-//
-// Lightweight "heartbeat" sync — runs every 15 s.
-// ONLY fetches the single most-recent position per active device
-// (devices that reported in the last 2 minutes) and upserts into
-// latest_positions.  Does NOT write to the telemetry history table.
-//
-// This is what makes vehicles move on the map in near-real-time.
-// The full runMariaSync() still handles history every 30 min.
-
-import { mariaPool, pgPool } from "./mariaSync.service.js";
+import { mariaPool }      from "./mariaSync.service.js";
+import { pgPool }         from "../config/db.js";          // ← was wrong before
 
 const log = (level, msg, meta = {}) =>
   console.log(JSON.stringify({ time: new Date().toISOString(), level, msg, ...meta }));
@@ -19,17 +11,17 @@ function N(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Device uid → postgres device_id cache (shared with mariaSync via module scope)
-let deviceCache = null;
+// Device uid → postgres device_id  (rebuilt every 5 min)
+let deviceCache   = null;
 let deviceCacheAt = 0;
-const CACHE_TTL = 5 * 60_000; // rebuild cache every 5 min
+const CACHE_TTL   = 5 * 60_000;
 
 async function getDeviceCache() {
   if (deviceCache && Date.now() - deviceCacheAt < CACHE_TTL) return deviceCache;
   const res = await pgPool.query(
     "SELECT id, device_uid FROM devices WHERE device_uid IS NOT NULL"
   );
-  deviceCache = new Map(res.rows.map((r) => [String(r.device_uid), r.id]));
+  deviceCache   = new Map(res.rows.map((r) => [String(r.device_uid), r.id]));
   deviceCacheAt = Date.now();
   return deviceCache;
 }
@@ -37,28 +29,27 @@ async function getDeviceCache() {
 let isRunning = false;
 
 export async function runLiveSync() {
-  if (isRunning) return; // skip if previous tick still running
+  if (isRunning) return;
   isRunning = true;
 
   let conn;
   try {
-    const cache   = await getDeviceCache();
-    const sinceMs = Date.now() - 2 * 60_000; // last 2 minutes
-    const since   = new Date(sinceMs).toISOString().slice(0, 19).replace("T", " ");
+    const cache = await getDeviceCache();
+    const since = new Date(Date.now() - 2 * 60_000)
+      .toISOString().slice(0, 19).replace("T", " ");
 
     conn = await mariaPool.getConnection();
 
-    // One latest row per device — only devices active in the last 2 minutes.
-    // Uses MAX(id) subquery which hits the primary key index efficiently.
+    // One latest row per device active in the last 2 minutes
     const rows = await conn.query(`
       SELECT
-        d.uniqueid      AS device_uid,
+        d.uniqueid   AS device_uid,
         e.latitude,
         e.longitude,
-        e.speed         AS speed_kph,
-        e.course        AS heading,
-        e.devicetime    AS device_time,
-        e.servertime    AS received_at
+        e.speed      AS speed_kph,
+        e.course     AS heading,
+        e.devicetime AS device_time,
+        e.servertime AS received_at
       FROM eventData e
       INNER JOIN device d ON d.id = e.deviceid
       INNER JOIN (
@@ -70,7 +61,7 @@ export async function runLiveSync() {
           AND NOT (latitude = 0 AND longitude = 0)
         GROUP BY deviceid
       ) latest ON e.deviceid = latest.deviceid
-                AND e.id      = latest.max_id
+              AND e.id       = latest.max_id
       LIMIT 5000
     `, [since]);
 
@@ -82,38 +73,26 @@ export async function runLiveSync() {
       return;
     }
 
-    let upserted = 0;
-    let skipped  = 0;
+    // Bulk upsert in chunks of 200
+    let upserted = 0, skipped = 0;
+    const BATCH  = 200;
 
-    // Bulk upsert in batches of 200 to avoid overwhelming PG
-    const BATCH = 200;
     for (let i = 0; i < rows.length; i += BATCH) {
-      const chunk = rows.slice(i, i + BATCH);
-
-      // Build a single multi-row upsert for the batch
-      const values  = [];
-      const params  = [];
-      let   pIdx    = 1;
+      const chunk  = rows.slice(i, i + BATCH);
+      const values = [];
+      const params = [];
+      let   p      = 1;
 
       for (const row of chunk) {
         const pgId = cache.get(String(row.device_uid));
         if (!pgId) { skipped++; continue; }
-
-        const lat = N(row.latitude);
-        const lon = N(row.longitude);
+        const lat  = N(row.latitude);
+        const lon  = N(row.longitude);
         if (lat === null || lon === null) { skipped++; continue; }
 
-        values.push(
-          `($${pIdx++}, $${pIdx++}, $${pIdx++}, $${pIdx++}, $${pIdx++}, $${pIdx++}, NOW())`
-        );
-        params.push(
-          pgId,
-          lat,
-          lon,
-          N(row.speed_kph)   ?? 0,
-          N(row.heading)     ?? 0,
-          row.device_time    ?? row.received_at ?? null
-        );
+        values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},NOW())`);
+        params.push(pgId, lat, lon, N(row.speed_kph) ?? 0, N(row.heading) ?? 0,
+                    row.device_time ?? row.received_at ?? null);
         upserted++;
       }
 
@@ -140,7 +119,7 @@ export async function runLiveSync() {
   } catch (err) {
     log("error", "liveSync error", { error: err.message });
   } finally {
-    if (conn) conn.release();
+    if (conn) try { conn.release(); } catch {}
     isRunning = false;
   }
 }
