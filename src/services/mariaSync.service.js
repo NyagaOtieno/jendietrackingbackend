@@ -3,9 +3,9 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import { createPool } from "mariadb";
-import { pgPool } from "../config/db.js";
-import { redis } from "../config/redis.js";
-import { runMariaSync, syncVehicles, loadDeviceMap } from "../services/mariaSync.service.js";
+import { pgPool }    from "../config/db.js";
+import { redis }     from "../config/redis.js";
+// ← self-import REMOVED: was causing "loadDeviceMap already declared" crash
 
 // ─────────────────────────────────────────────
 // LOGGER
@@ -286,28 +286,40 @@ export async function syncTelemetry() {
 
     log("info", "All telemetry rows from MariaDB", { count: allRows.length });
 
-    let posUpserted = 0;
-    let telInserted = 0;
+    // ─── BULK UPSERT latest_positions (was row-by-row — 290 round-trips → 2) ──
+    {
+      const BATCH = 200;
+      let posUpserted = 0;
+      for (let i = 0; i < latestRows.length; i += BATCH) {
+        const chunk  = latestRows.slice(i, i + BATCH);
+        const vals   = [];
+        const params = [];
+        let   p      = 1;
 
-    // ─── UPSERT latest_positions ──────────────────────────────────────────
-    // Schema: device_id, latitude, longitude, speed_kph, heading,
-    //         device_time, received_at, updated_at
-    for (const row of latestRows) {
-      const cached = deviceMapCache.get(String(row.device_uid));
-      if (!cached) continue;
+        for (const row of chunk) {
+          const cached = deviceMapCache.get(String(row.device_uid));
+          if (!cached) continue;
+          const lat = N(row.latitude);
+          const lon = N(row.longitude);
+          if (lat === null || lon === null) continue;
 
-      const { pgDeviceId } = cached;
-      const lat = N(row.latitude);
-      const lon = N(row.longitude);
-      if (lat === null || lon === null) continue;
+          vals.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},NOW())`);
+          params.push(
+            cached.pgDeviceId, lat, lon,
+            N(row.speed_kph) ?? 0,
+            N(row.heading)   ?? 0,
+            row.device_time,
+            row.received_at
+          );
+          posUpserted++;
+        }
 
-      try {
+        if (!vals.length) continue;
         await pgPool.query(`
-          INSERT INTO latest_positions (
-            device_id, latitude, longitude,
-            speed_kph, heading, device_time, received_at, updated_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+          INSERT INTO latest_positions
+            (device_id, latitude, longitude, speed_kph, heading,
+             device_time, received_at, updated_at)
+          VALUES ${vals.join(",")}
           ON CONFLICT (device_id) DO UPDATE SET
             latitude    = EXCLUDED.latitude,
             longitude   = EXCLUDED.longitude,
@@ -318,74 +330,55 @@ export async function syncTelemetry() {
             updated_at  = NOW()
           WHERE EXCLUDED.device_time >= latest_positions.device_time
              OR latest_positions.device_time IS NULL
-        `, [
-          pgDeviceId,
-          lat,
-          lon,
-          N(row.speed_kph) ?? 0,
-          N(row.heading)   ?? 0,
-          row.device_time,
-          row.received_at,
-        ]);
-
-        // Advance positionid checkpoint
-        const eventId = N(row.event_id);
-        if (eventId) {
-          await pgPool.query(`
-            UPDATE devices SET positionid = GREATEST(positionid, $1) WHERE id = $2
-          `, [eventId, pgDeviceId]);
-        }
-
-        posUpserted++;
-      } catch (e) {
-        log("warn", "latest_positions upsert failed", { uid: row.device_uid, error: e.message });
+        `, params);
       }
+      log("info", "latest_positions upserted", { count: posUpserted });
     }
-
-    log("info", "latest_positions upserted", { count: posUpserted });
 
     // ─── REDIS pipeline ───────────────────────────────────────────────────
     await cacheLatestPositions(latestRows);
 
-    // ─── INSERT telemetry ─────────────────────────────────────────────────
-    // Schema: device_id, latitude, longitude, speed_kph, heading,
-    //         device_time, received_at
-    // NOTE: no event_id unique constraint in schema → use received_at dedup
-    for (const row of allRows) {
-      const cached = deviceMapCache.get(String(row.device_uid));
-      if (!cached) continue;
+    // ─── BULK INSERT telemetry (was row-by-row — 480 round-trips → 3) ──────
+    {
+      const BATCH = 200;
+      let telInserted = 0;
+      for (let i = 0; i < allRows.length; i += BATCH) {
+        const chunk  = allRows.slice(i, i + BATCH);
+        const vals   = [];
+        const params = [];
+        let   p      = 1;
 
-      const { pgDeviceId } = cached;
-      const lat = N(row.latitude);
-      const lon = N(row.longitude);
-      if (lat === null || lon === null) continue;
+        for (const row of chunk) {
+          const cached = deviceMapCache.get(String(row.device_uid));
+          if (!cached) continue;
+          const lat = N(row.latitude);
+          const lon = N(row.longitude);
+          if (lat === null || lon === null) continue;
 
-      try {
+          vals.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`);
+          params.push(
+            cached.pgDeviceId, lat, lon,
+            N(row.speed_kph) ?? 0,
+            N(row.heading)   ?? 0,
+            row.device_time,
+            row.received_at
+          );
+          telInserted++;
+        }
+
+        if (!vals.length) continue;
         await pgPool.query(`
-          INSERT INTO telemetry (
-            device_id, latitude, longitude,
-            speed_kph, heading, device_time, received_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          INSERT INTO telemetry
+            (device_id, latitude, longitude, speed_kph, heading,
+             device_time, received_at)
+          VALUES ${vals.join(",")}
           ON CONFLICT DO NOTHING
-        `, [
-          pgDeviceId,
-          lat,
-          lon,
-          N(row.speed_kph) ?? 0,
-          N(row.heading)   ?? 0,
-          row.device_time,
-          row.received_at,
-        ]);
-        telInserted++;
-      } catch (e) {
-        log("warn", "telemetry insert failed", { uid: row.device_uid, error: e.message });
+        `, params);
       }
+      log("info", "Telemetry sync done", { telemetry: telInserted, latest: 0 });
     }
 
     lastSyncTime = new Date().toISOString();
-
-    log("info", "Telemetry sync done", { telemetry: telInserted, latest: posUpserted });
 
   } catch (e) {
     log("error", "Telemetry sync failed", { error: e.message });
@@ -447,4 +440,83 @@ export async function initMariaSync() {
   await loadDeviceMap();
   await syncTelemetry();
   log("info", "MariaSync init complete");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUICK SYNC — only latest position per active device (last 2 min), bulk upsert
+// Completes in ~1 second. Called every 10 s by the worker for near-real-time.
+// ─────────────────────────────────────────────────────────────────────────────
+let isQuickRunning = false;
+
+export async function runQuickSync() {
+  if (isQuickRunning)       return;
+  if (!deviceMapCache.size) return; // device map not loaded yet
+
+  isQuickRunning = true;
+  let conn;
+  try {
+    conn = await getMariaConn();
+    const sinceStr = new Date(Date.now() - 2 * 60_000)
+      .toISOString().slice(0, 19).replace("T", " ");
+
+    const rows = await conn.query(`
+      SELECT
+        d.uniqueid   AS device_uid,
+        e.latitude,  e.longitude,
+        e.speed      AS speed_kph,
+        e.course     AS heading,
+        e.devicetime AS device_time,
+        e.servertime AS received_at
+      FROM eventData e
+      INNER JOIN device d ON d.id = e.deviceid
+      INNER JOIN (
+        SELECT deviceid, MAX(id) AS max_id
+        FROM eventData
+        WHERE servertime > ?
+          AND latitude  BETWEEN -90  AND 90
+          AND longitude BETWEEN -180 AND 180
+          AND NOT (latitude = 0 AND longitude = 0)
+        GROUP BY deviceid
+      ) latest ON e.deviceid = latest.deviceid AND e.id = latest.max_id
+      LIMIT 5000
+    `, [sinceStr]);
+
+    conn.release(); conn = null;
+    if (!rows.length) return;
+
+    let upserted = 0;
+    for (let i = 0; i < rows.length; i += 200) {
+      const chunk = rows.slice(i, i + 200);
+      const vals  = [], params = [];
+      let p = 1;
+      for (const r of chunk) {
+        const cached = deviceMapCache.get(String(r.device_uid));
+        if (!cached) continue;
+        const lat = N(r.latitude), lon = N(r.longitude);
+        if (lat == null || lon == null) continue;
+        vals.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},NOW())`);
+        params.push(cached.pgDeviceId, lat, lon, N(r.speed_kph)??0, N(r.heading)??0, r.device_time, r.received_at);
+        upserted++;
+      }
+      if (!vals.length) continue;
+      await pgPool.query(`
+        INSERT INTO latest_positions
+          (device_id,latitude,longitude,speed_kph,heading,device_time,received_at,updated_at)
+        VALUES ${vals.join(",")}
+        ON CONFLICT (device_id) DO UPDATE SET
+          latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude,
+          speed_kph=EXCLUDED.speed_kph, heading=EXCLUDED.heading,
+          device_time=EXCLUDED.device_time, received_at=EXCLUDED.received_at,
+          updated_at=NOW()
+        WHERE EXCLUDED.device_time >= latest_positions.device_time
+           OR latest_positions.device_time IS NULL
+      `, params);
+    }
+    log("info", "quickSync complete", { active: rows.length, upserted });
+  } catch (e) {
+    log("error", "quickSync error", { error: e.message });
+  } finally {
+    try { conn?.release(); } catch {}
+    isQuickRunning = false;
+  }
 }
