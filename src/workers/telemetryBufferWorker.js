@@ -3,54 +3,20 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import { syncVehicles, runMariaSync, mariaPool } from "../services/mariaSync.service.js";
-import { runLiveSync }                            from "../services/liveSync.service.js";
 import { pgPool }                                from "../config/db.js";
 
-// ─── Intervals ────────────────────────────────────────────────────────────────
-//
-//  LIVE_INTERVAL   — how often to sync the latest position for active devices.
-//                    Default: 15 s.  Set LIVE_SYNC_INTERVAL in .env to override.
-//                    This is what makes vehicles move on the map.
-//
-//  VEHICLE_INTERVAL — how often to sync the vehicle registry (plates, names).
-//                    Default: 30 min.
-//
-//  TELEMETRY_INTERVAL — how often to run the full history sync from MariaDB.
-//                    Default: 30 min.  Keep this long — it's expensive.
-//
-const LIVE_INTERVAL      = Number(process.env.LIVE_SYNC_INTERVAL  ||   15_000); //  15 s
-const VEHICLE_INTERVAL   = Number(process.env.VEHICLE_SYNC_INTERVAL|| 1_800_000); // 30 min
-const TELEMETRY_INTERVAL = Number(process.env.SYNC_INTERVAL        || 1_800_000); // 30 min
+// ── Intervals ─────────────────────────────────────────────────────────────────
+const LIVE_INTERVAL      = Number(process.env.LIVE_SYNC_INTERVAL   ||  15_000); // 15 s
+const VEHICLE_INTERVAL   = Number(process.env.VEHICLE_SYNC_INTERVAL || 1_800_000); // 30 min
+const TELEMETRY_INTERVAL = Number(process.env.SYNC_INTERVAL         ||    30_000); // 30 s (keep existing)
 
+// ── Guard flags (prevent overlap) ────────────────────────────────────────────
 let liveBusy = false;
-let telBusy  = false;
 let vehBusy  = false;
-
-async function liveTick() {
-  if (liveBusy) return;
-  liveBusy = true;
-  try   { await runLiveSync(); }
-  catch (e) { console.error("[Worker] Live sync error:", e.message); }
-  finally   { liveBusy = false; }
-}
-
-async function vehicleTick() {
-  if (vehBusy) return;
-  vehBusy = true;
-  try   { await syncVehicles(); }
-  catch (e) { console.error("[Worker] Vehicle sync error:", e.message); }
-  finally   { vehBusy = false; }
-}
-
-async function telemetryTick() {
-  if (telBusy) return;
-  telBusy = true;
-  try   { await runMariaSync(); }
-  catch (e) { console.error("[Worker] Telemetry sync error:", e.message); }
-  finally   { telBusy = false; }
-}
+let telBusy  = false;
 
 async function start() {
+
   // ── Verify connections ────────────────────────────────────────────────────
   const pg = await pgPool.connect();
   pg.release();
@@ -60,26 +26,61 @@ async function start() {
   mc.release();
   console.log("MariaDB connected");
 
-  // ── Vehicle registry (run once on boot, then every 30 min) ────────────────
-  await vehicleTick();
-  setInterval(vehicleTick, VEHICLE_INTERVAL);
+  // ── Load liveSync dynamically — if the import fails, worker keeps going ───
+  let runLiveSync = null;
+  try {
+    const mod = await import("../services/liveSync.service.js");
+    runLiveSync = mod.runLiveSync;
+    console.log(`[Worker] Live sync enabled — every ${LIVE_INTERVAL / 1000}s`);
+  } catch (e) {
+    console.warn("[Worker] Live sync unavailable (will use MariaSync only):", e.message);
+  }
 
-  // ── Live position sync (starts 3 s after boot, runs every 15 s) ──────────
-  setTimeout(async () => {
-    console.log(`[Worker] Live sync every ${LIVE_INTERVAL / 1000}s`);
-    await liveTick();
-    setInterval(liveTick, LIVE_INTERVAL);
-  }, 3_000);
+  // ── Vehicle registry — once on boot, then every 30 min ───────────────────
+  try { await syncVehicles(); } catch (e) { console.error("[Worker] Vehicle sync error:", e.message); }
+  setInterval(async () => {
+    if (vehBusy) return;
+    vehBusy = true;
+    try   { await syncVehicles(); }
+    catch (e) { console.error("[Worker] Vehicle sync error:", e.message); }
+    finally   { vehBusy = false; }
+  }, VEHICLE_INTERVAL);
 
-  // ── Full telemetry history sync (starts 10 s after boot, runs every 30 min)
+  // ── Live position sync — every 15 s (fast, only active devices) ──────────
+  if (runLiveSync) {
+    // First run after 3 s so DB is warm
+    setTimeout(async () => {
+      if (!liveBusy) { liveBusy = true; try { await runLiveSync(); } catch {} finally { liveBusy = false; } }
+      setInterval(async () => {
+        if (liveBusy) return;
+        liveBusy = true;
+        try   { await runLiveSync(); }
+        catch (e) { console.error("[Worker] Live sync error:", e.message); }
+        finally   { liveBusy = false; }
+      }, LIVE_INTERVAL);
+    }, 3_000);
+  }
+
+  // ── Full MariaSync — every 30 s (history + latest_positions fallback) ─────
+  // Starts 10 s after boot to let live sync run first
   setTimeout(async () => {
-    console.log(`[Worker] Full telemetry sync every ${TELEMETRY_INTERVAL / 1000}s`);
-    await telemetryTick();
-    setInterval(telemetryTick, TELEMETRY_INTERVAL);
+    if (!telBusy) {
+      telBusy = true;
+      try   { await runMariaSync(); }
+      catch (e) { console.error("[Worker] MariaSync error:", e.message); }
+      finally   { telBusy = false; }
+    }
+    setInterval(async () => {
+      if (telBusy) return;
+      telBusy = true;
+      try   { await runMariaSync(); }
+      catch (e) { console.error("[Worker] MariaSync error:", e.message); }
+      finally   { telBusy = false; }
+    }, TELEMETRY_INTERVAL);
   }, 10_000);
 }
 
 start().catch((e) => {
-  console.error("[Worker] Fatal:", e.message);
+  console.error("[Worker] Fatal start error:", e.message);
   process.exit(1);
 });
