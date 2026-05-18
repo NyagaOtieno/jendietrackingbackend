@@ -70,26 +70,26 @@ async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
 // ─────────────────────────────────────────────
 async function loadVehicleLatestFromDb(req, vehicleId) {
   try {
-    const vId = String(vehicleId).trim(); // ✅ FIX: safe for BIGINT IDs
+    const vId = String(vehicleId || "").trim(); // SAFE BIGINT
 
     if (!vId) return null;
 
     const lpSql = `
       SELECT
-        d.device_uid        AS "deviceUid",
-        d.id                AS "deviceId",
-        lp.latitude         AS lat,
-        lp.longitude        AS lon,
+        d.device_uid AS "deviceUid",
+        d.id AS "deviceId",
+        lp.latitude AS lat,
+        lp.longitude AS lon,
         COALESCE(lp.speed_kph, 0) AS "speedKph",
         lp.heading,
-        lp.device_time      AS "deviceTime",
-        lp.received_at      AS "receivedAt",
-        v.id                        AS "vehicleId",
+        lp.device_time AS "deviceTime",
+        lp.received_at AS "receivedAt",
+        v.id AS "vehicleId",
         COALESCE(v.plate_number,'') AS "plateNumber",
-        COALESCE(v.unit_name,'')    AS "unitName",
-        COALESCE(v.account_id, 0)   AS "accountId"
+        COALESCE(v.unit_name,'') AS "unitName",
+        COALESCE(v.account_id, 0) AS "accountId"
       FROM latest_positions lp
-      INNER JOIN devices  d ON d.id = lp.device_id
+      INNER JOIN devices d ON d.id = lp.device_id
       INNER JOIN vehicles v ON v.id = d.vehicle_id
       WHERE v.id = $1
       LIMIT 1
@@ -100,20 +100,20 @@ async function loadVehicleLatestFromDb(req, vehicleId) {
 
     const telSql = `
       SELECT
-        d.device_uid        AS "deviceUid",
-        d.id                AS "deviceId",
-        t.latitude          AS lat,
-        t.longitude         AS lon,
+        d.device_uid AS "deviceUid",
+        d.id AS "deviceId",
+        t.latitude AS lat,
+        t.longitude AS lon,
         COALESCE(t.speed_kph, 0) AS "speedKph",
         t.heading,
-        t.device_time       AS "deviceTime",
-        t.received_at       AS "receivedAt",
-        v.id                        AS "vehicleId",
+        t.device_time AS "deviceTime",
+        t.received_at AS "receivedAt",
+        v.id AS "vehicleId",
         COALESCE(v.plate_number,'') AS "plateNumber",
-        COALESCE(v.unit_name,'')    AS "unitName",
-        COALESCE(v.account_id, 0)   AS "accountId"
+        COALESCE(v.unit_name,'') AS "unitName",
+        COALESCE(v.account_id, 0) AS "accountId"
       FROM telemetry t
-      INNER JOIN devices  d ON d.id = t.device_id
+      INNER JOIN devices d ON d.id = t.device_id
       INNER JOIN vehicles v ON v.id = d.vehicle_id
       WHERE v.id = $1
       ORDER BY t.received_at DESC
@@ -200,7 +200,7 @@ export async function getLatestPositions(req, res) {
 
 export async function getVehicleLatestPosition(req, res) {
   try {
-    const { vehicleId } = req.params;
+    const vehicleId = String(req.params.vehicleId || "").trim();
 
     const result = await loadVehicleLatestFromDb(req, vehicleId);
 
@@ -298,7 +298,7 @@ export async function getPositionById(req, res) {
       WHERE t.id = $1
     `;
     const params = [id];
-    if (!isPrivileged(req)) { sql += ` AND v.account_id = $2`; params.push(Number(req?.user?.accountId || 0)); }
+    if (!isPrivileged(req)) { sql += ` AND v.account_id = $2`; params.push(String(req?.user?.accountId || "0")); }
     const result = await query(sql, params);
     if (!result.rows.length) {
       return res.status(404).json({ success: false, message: "Position not found" });
