@@ -22,8 +22,6 @@ function isPrivileged(req) {
 
 // ─────────────────────────────────────────────
 // BATCH: latest positions (paginated)
-// Default: 5 000 rows, max 10 000.
-// Frontend loads pages 0/1/2 in parallel to cover large fleets.
 // ─────────────────────────────────────────────
 async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
   const params = [];
@@ -53,12 +51,15 @@ async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
     params.push(accId);
   }
 
-  const safeLimit  = Math.min(Math.max(parseInt(limit)  || 5000, 1), 10_000);
+  const safeLimit  = Math.min(Math.max(parseInt(limit) || 5000, 1), 10000);
   const safeOffset = Math.max(parseInt(offset) || 0, 0);
 
-  sql += ` ORDER BY lp.received_at DESC
-           LIMIT  $${params.length + 1}
-           OFFSET $${params.length + 2}`;
+  sql += `
+    ORDER BY lp.received_at DESC
+    LIMIT  $${params.length + 1}
+    OFFSET $${params.length + 2}
+  `;
+
   params.push(safeLimit, safeOffset);
 
   const result = await query(sql, params);
@@ -66,12 +67,12 @@ async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
 }
 
 // ─────────────────────────────────────────────
-// SINGLE VEHICLE: latest position on-demand
-// Called when a vehicle is selected that may not appear in the batch.
-// Tries latest_positions first (fast O(1)); falls back to telemetry.
+// SINGLE VEHICLE: latest position
+// FIXED: no Number() casting
 // ─────────────────────────────────────────────
 async function loadVehicleLatestFromDb(req, vehicleId) {
-  const vId = Number(vehicleId);
+  const vId = vehicleId; // ✅ FIX: KEEP AS STRING / ORIGINAL TYPE
+
   if (!vId) return null;
 
   const lpSql = `
@@ -94,10 +95,10 @@ async function loadVehicleLatestFromDb(req, vehicleId) {
     WHERE v.id = $1
     LIMIT 1
   `;
+
   const lpResult = await query(lpSql, [vId]);
   if (lpResult.rows.length) return lpResult.rows[0];
 
-  // Fallback: most recent telemetry row for this vehicle
   const telSql = `
     SELECT
       d.device_uid        AS "deviceUid",
@@ -119,6 +120,7 @@ async function loadVehicleLatestFromDb(req, vehicleId) {
     ORDER BY t.received_at DESC
     LIMIT 1
   `;
+
   const telResult = await query(telSql, [vId]);
   return telResult.rows[0] || null;
 }
@@ -135,8 +137,17 @@ async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
     clauses.push(`v.account_id = $${index++}`);
     params.push(Number(req?.user?.accountId || 0));
   }
-  if (from) { clauses.push(`t.received_at >= $${index++}`); params.push(from); }
-  if (to)   { clauses.push(`t.received_at <= $${index++}`); params.push(to);   }
+
+  if (from) {
+    clauses.push(`t.received_at >= $${index++}`);
+    params.push(from);
+  }
+
+  if (to) {
+    clauses.push(`t.received_at <= $${index++}`);
+    params.push(to);
+  }
+
   params.push(limit);
 
   const sql = `
@@ -182,14 +193,24 @@ export async function getLatestPositions(req, res) {
 export async function getVehicleLatestPosition(req, res) {
   try {
     const { vehicleId } = req.params;
+
+    // ✅ FIX: DO NOT CONVERT TO NUMBER
     const row = await loadVehicleLatestFromDb(req, vehicleId);
+
     if (!row) {
-      return res.status(404).json({ success: false, message: "No position found for this vehicle" });
+      return res.status(404).json({
+        success: false,
+        message: "No position found for this vehicle"
+      });
     }
+
     return res.json({ success: true, data: row });
   } catch (err) {
     console.error("getVehicleLatestPosition error:", err);
-    return res.status(500).json({ success: false, message: "Failed to load vehicle position" });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load vehicle position"
+    });
   }
 }
 
