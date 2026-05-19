@@ -96,8 +96,14 @@ async function loadDeviceMap() {
     "SELECT id, device_uid, vehicle_id FROM devices WHERE device_uid IS NOT NULL"
   );
   deviceMapCache = new Map(
-    rows.map(r => [r.device_uid, { pgDeviceId: r.id, pgVehicleId: r.vehicle_id }])
-  );
+  rows.map(r => [
+    r.device_uid,
+    {
+      pgDeviceId: Number(r.id),
+      pgVehicleId: r.vehicle_id ? Number(r.vehicle_id) : null
+    }
+  ])
+);
   log("info", "Device cache loaded", { count: deviceMapCache.size });
 }
 
