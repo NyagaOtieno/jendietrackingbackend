@@ -22,6 +22,8 @@ function isPrivileged(req) {
 
 // ─────────────────────────────────────────────
 // BATCH: latest positions (paginated)
+// Default: 5 000 rows, max 10 000.
+// Frontend loads pages 0/1/2 in parallel to cover large fleets.
 // ─────────────────────────────────────────────
 async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
   const params = [];
@@ -57,7 +59,6 @@ async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
   sql += ` ORDER BY lp.received_at DESC
            LIMIT  $${params.length + 1}
            OFFSET $${params.length + 2}`;
-
   params.push(safeLimit, safeOffset);
 
   const result = await query(sql, params);
@@ -66,79 +67,60 @@ async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
 
 // ─────────────────────────────────────────────
 // SINGLE VEHICLE: latest position on-demand
-// FIX: DO NOT CAST vehicleId TO Number (prevents int overflow 22003)
+// Called when a vehicle is selected that may not appear in the batch.
+// Tries latest_positions first (fast O(1)); falls back to telemetry.
 // ─────────────────────────────────────────────
 async function loadVehicleLatestFromDb(req, vehicleId) {
-  try {
-    const vId = String(vehicleId || "").trim(); // SAFE BIGINT
+  const vId = Number(vehicleId);
+  if (!vId) return null;
 
-    if (!vId) return null;
+  const lpSql = `
+    SELECT
+      d.device_uid        AS "deviceUid",
+      d.id                AS "deviceId",
+      lp.latitude         AS lat,
+      lp.longitude        AS lon,
+      COALESCE(lp.speed_kph, 0) AS "speedKph",
+      lp.heading,
+      lp.device_time      AS "deviceTime",
+      lp.received_at      AS "receivedAt",
+      v.id                        AS "vehicleId",
+      COALESCE(v.plate_number,'') AS "plateNumber",
+      COALESCE(v.unit_name,'')    AS "unitName",
+      COALESCE(v.account_id, 0)   AS "accountId"
+    FROM latest_positions lp
+    INNER JOIN devices  d ON d.id = lp.device_id
+    INNER JOIN vehicles v ON v.id = d.vehicle_id
+    WHERE v.id = $1
+    LIMIT 1
+  `;
+  const lpResult = await query(lpSql, [vId]);
+  if (lpResult.rows.length) return lpResult.rows[0];
 
-    const lpSql = `
-      SELECT
-        d.device_uid AS "deviceUid",
-        d.id AS "deviceId",
-        lp.latitude AS lat,
-        lp.longitude AS lon,
-        COALESCE(lp.speed_kph, 0) AS "speedKph",
-        lp.heading,
-        lp.device_time AS "deviceTime",
-        lp.received_at AS "receivedAt",
-        v.id AS "vehicleId",
-        COALESCE(v.plate_number,'') AS "plateNumber",
-        COALESCE(v.unit_name,'') AS "unitName",
-        COALESCE(v.account_id, 0) AS "accountId"
-      FROM latest_positions lp
-      INNER JOIN devices d ON d.id = lp.device_id
-      INNER JOIN vehicles v ON v.id = d.vehicle_id
-      WHERE v.id = $1
-      LIMIT 1
-    `;
-
-    const lpResult = await query(lpSql, [vId]);
-    if (lpResult.rows.length) return lpResult.rows[0];
-
-    const telSql = `
-      SELECT
-        d.device_uid AS "deviceUid",
-        d.id AS "deviceId",
-        t.latitude AS lat,
-        t.longitude AS lon,
-        COALESCE(t.speed_kph, 0) AS "speedKph",
-        t.heading,
-        t.device_time AS "deviceTime",
-        t.received_at AS "receivedAt",
-        v.id AS "vehicleId",
-        COALESCE(v.plate_number,'') AS "plateNumber",
-        COALESCE(v.unit_name,'') AS "unitName",
-        COALESCE(v.account_id, 0) AS "accountId"
-      FROM telemetry t
-      INNER JOIN devices d ON d.id = t.device_id
-      INNER JOIN vehicles v ON v.id = d.vehicle_id
-      WHERE v.id = $1
-      ORDER BY t.received_at DESC
-      LIMIT 1
-    `;
-
-    const telResult = await query(telSql, [vId]);
-    return telResult.rows[0] || null;
-
-  } catch (err) {
-    // ─────────────────────────────────────────────
-    // IMPROVED ERROR HANDLING
-    // ─────────────────────────────────────────────
-    console.error("loadVehicleLatestFromDb error:", err);
-
-    if (err.code === "22003") {
-      return {
-        error: true,
-        message: "Vehicle ID is too large or invalid for database integer type",
-        hint: "Backend expected BIGINT-compatible ID. No schema change required."
-      };
-    }
-
-    return null;
-  }
+  // Fallback: most recent telemetry row for this vehicle
+  const telSql = `
+    SELECT
+      d.device_uid        AS "deviceUid",
+      d.id                AS "deviceId",
+      t.latitude          AS lat,
+      t.longitude         AS lon,
+      COALESCE(t.speed_kph, 0) AS "speedKph",
+      t.heading,
+      t.device_time       AS "deviceTime",
+      t.received_at       AS "receivedAt",
+      v.id                        AS "vehicleId",
+      COALESCE(v.plate_number,'') AS "plateNumber",
+      COALESCE(v.unit_name,'')    AS "unitName",
+      COALESCE(v.account_id, 0)   AS "accountId"
+    FROM telemetry t
+    INNER JOIN devices  d ON d.id = t.device_id
+    INNER JOIN vehicles v ON v.id = d.vehicle_id
+    WHERE v.id = $1
+    ORDER BY t.received_at DESC
+    LIMIT 1
+  `;
+  const telResult = await query(telSql, [vId]);
+  return telResult.rows[0] || null;
 }
 
 // ─────────────────────────────────────────────
@@ -154,8 +136,7 @@ async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
     params.push(Number(req?.user?.accountId || 0));
   }
   if (from) { clauses.push(`t.received_at >= $${index++}`); params.push(from); }
-  if (to)   { clauses.push(`t.received_at <= $${index++}`); params.push(to); }
-
+  if (to)   { clauses.push(`t.received_at <= $${index++}`); params.push(to);   }
   params.push(limit);
 
   const sql = `
@@ -200,42 +181,15 @@ export async function getLatestPositions(req, res) {
 
 export async function getVehicleLatestPosition(req, res) {
   try {
-    const vehicleId = String(req.params.vehicleId || "").trim();
-
-    const result = await loadVehicleLatestFromDb(req, vehicleId);
-
-    // 🔴 improved error handling response
-    if (result?.error) {
-      return res.status(400).json({
-        success: false,
-        message: result.message,
-        hint: result.hint
-      });
+    const { vehicleId } = req.params;
+    const row = await loadVehicleLatestFromDb(req, vehicleId);
+    if (!row) {
+      return res.status(404).json({ success: false, message: "No position found for this vehicle" });
     }
-
-    if (!result) {
-      return res.status(404).json({
-        success: false,
-        message: "No position found for this vehicle"
-      });
-    }
-
-    return res.json({ success: true, data: result });
-
+    return res.json({ success: true, data: row });
   } catch (err) {
     console.error("getVehicleLatestPosition error:", err);
-
-    if (err.code === "22003") {
-      return res.status(400).json({
-        success: false,
-        message: "Vehicle ID overflow error (invalid numeric range)"
-      });
-    }
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to load vehicle position"
-    });
+    return res.status(500).json({ success: false, message: "Failed to load vehicle position" });
   }
 }
 
@@ -298,7 +252,7 @@ export async function getPositionById(req, res) {
       WHERE t.id = $1
     `;
     const params = [id];
-    if (!isPrivileged(req)) { sql += ` AND v.account_id = $2`; params.push(String(req?.user?.accountId || "0")); }
+    if (!isPrivileged(req)) { sql += ` AND v.account_id = $2`; params.push(Number(req?.user?.accountId || 0)); }
     const result = await query(sql, params);
     if (!result.rows.length) {
       return res.status(404).json({ success: false, message: "Position not found" });
