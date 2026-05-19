@@ -303,8 +303,22 @@ export async function syncTelemetry() {
         let   p      = 1;
 
         for (const row of chunk) {
-          const cached = deviceMapCache.get(String(row.device_uid));
-          if (!cached) continue;
+          const uid = String(row.device_uid).trim();
+
+// try direct match
+let cached = deviceMapCache.get(uid);
+
+// fallback: handle leading zero mismatch
+if (!cached) {
+  const normalized = uid.replace(/^0+/, "");
+  cached = deviceMapCache.get(normalized) || deviceMapCache.get("0" + normalized);
+}
+          if (!cached) {
+  log("warn", "Unmapped device_uid (sync skipped)", {
+    uid: row.device_uid
+  });
+  continue;
+}
           const lat = N(row.latitude);
           const lon = N(row.longitude);
           if (lat === null || lon === null) continue;
@@ -512,8 +526,7 @@ export async function runQuickSync() {
           speed_kph=EXCLUDED.speed_kph, heading=EXCLUDED.heading,
           device_time=EXCLUDED.device_time, received_at=EXCLUDED.received_at,
           updated_at=NOW()
-        WHERE EXCLUDED.device_time >= latest_positions.device_time
-           OR latest_positions.device_time IS NULL
+       
       `, params);
     }
     log("info", "quickSync complete", { active: rows.length, upserted });
