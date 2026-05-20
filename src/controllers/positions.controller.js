@@ -4,16 +4,11 @@ import * as geo from "../services/reverseGeocode.js";
 import { normalizeLimit } from "../utils/sql.js";
 import { isPrivilegedRole } from "../middleware/auth.js";
 
-// ─────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────
 async function safeLocationName(lat, lon) {
   try {
     if (!lat || !lon) return "Unknown location";
     return (await geo.getLocationName(lat, lon)) || "Unknown location";
-  } catch {
-    return "Unknown location";
-  }
+  } catch { return "Unknown location"; }
 }
 
 function isPrivileged(req) {
@@ -21,7 +16,12 @@ function isPrivileged(req) {
 }
 
 // ─────────────────────────────────────────────
-// BATCH: latest positions (paginated)
+// BATCH: latest positions
+//
+// FIX: ORDER BY device_id ASC (stable primary key).
+// Previous ORDER BY updated_at DESC caused vehicles to shift
+// between pages every second as liveSync updated updated_at,
+// making vehicles appear and disappear on the map.
 // ─────────────────────────────────────────────
 async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
   const params = [];
@@ -55,7 +55,8 @@ async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
   const safeLimit  = Math.min(Math.max(parseInt(limit)  || 5000, 1), 10_000);
   const safeOffset = Math.max(parseInt(offset) || 0, 0);
 
-  sql += ` ORDER BY lp.updated_at DESC
+  // ✅ FIX: stable ordering — device_id never changes between requests
+  sql += ` ORDER BY lp.device_id ASC
            LIMIT  $${params.length + 1}
            OFFSET $${params.length + 2}`;
   params.push(safeLimit, safeOffset);
@@ -66,15 +67,11 @@ async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
 
 // ─────────────────────────────────────────────
 // SINGLE VEHICLE: latest position on-demand
-//
-// FIX: cast vehicleId to bigint — values like 16100008574
-//      overflow integer (pg_strtoint32_safe error)
 // ─────────────────────────────────────────────
 async function loadVehicleLatestFromDb(req, vehicleId) {
   const vId = Number(vehicleId);
   if (!vId || isNaN(vId)) return null;
 
-  // Try latest_positions first (fast O(1) lookup)
   const lpResult = await query(
     `SELECT
        d.device_uid                  AS "deviceUid",
@@ -99,7 +96,6 @@ async function loadVehicleLatestFromDb(req, vehicleId) {
   );
   if (lpResult.rows.length) return lpResult.rows[0];
 
-  // Fallback: most recent telemetry row
   const telResult = await query(
     `SELECT
        d.device_uid                  AS "deviceUid",
@@ -185,7 +181,7 @@ export async function getVehicleLatestPosition(req, res) {
   try {
     const { vehicleId } = req.params;
     const row = await loadVehicleLatestFromDb(req, vehicleId);
-    if (!row) return res.status(404).json({ success: false, message: "No position found for this vehicle" });
+    if (!row) return res.status(404).json({ success: false, message: "No position found" });
     return res.json({ success: true, data: row });
   } catch (err) {
     console.error("getVehicleLatestPosition error:", err);
@@ -200,12 +196,9 @@ export async function getHistory(req, res) {
     if (!deviceUid) return res.status(400).json({ success: false, message: "deviceUid is required" });
 
     const rows = await loadHistoryFromDb(req, deviceUid, limit, from, to);
-
-    // Only geocode small sets — large sets time out the response
     const enriched = rows.length <= 20
       ? await Promise.all(rows.map(async pos => ({
-          ...pos,
-          locationName: await safeLocationName(pos.lat, pos.lon),
+          ...pos, locationName: await safeLocationName(pos.lat, pos.lon),
         })))
       : rows;
 
@@ -219,9 +212,9 @@ export async function getHistory(req, res) {
 export async function createPosition(req, res) {
   try {
     const { deviceUid, lat, lon, speedKph = 0, heading = 0, deviceTime = null } = req.body;
-    if (!deviceUid || lat == null || lon == null) {
+    if (!deviceUid || lat == null || lon == null)
       return res.status(400).json({ success: false, message: "deviceUid, lat and lon are required" });
-    }
+
     const result = await query(
       `INSERT INTO telemetry (device_id, latitude, longitude, speed_kph, heading, device_time)
        SELECT d.id, $2, $3, $4, $5, $6 FROM devices d WHERE d.device_uid = $1
@@ -253,10 +246,7 @@ export async function getPositionById(req, res) {
       INNER JOIN vehicles v ON v.id = d.vehicle_id
       WHERE t.id = $1`;
     const params = [id];
-    if (!isPrivileged(req)) {
-      sql += ` AND v.account_id = $2`;
-      params.push(Number(req?.user?.accountId || 0));
-    }
+    if (!isPrivileged(req)) { sql += ` AND v.account_id = $2`; params.push(Number(req?.user?.accountId || 0)); }
     const result = await query(sql, params);
     if (!result.rows.length) return res.status(404).json({ success: false, message: "Position not found" });
     const row = result.rows[0];
