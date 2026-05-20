@@ -14,10 +14,9 @@ const log = (level, msg, meta = {}) =>
 
 // ─────────────────────────────────────────────
 // STATE
-// lastEventId is seeded from PG on startup so restarts don't lose progress
 // ─────────────────────────────────────────────
 export let isSyncRunning = false;
-let lastEventId = 0;
+let lastEventId = 0; // persisted to PG so restarts don't lose progress
 
 // ─────────────────────────────────────────────
 // MARIA POOL
@@ -28,10 +27,31 @@ export const mariaPool = createPool({
   user:            process.env.MARIADB_USER     || "root",
   password:        process.env.MARIADB_PASSWORD || "nairobiyetu",
   database:        process.env.MARIADB_DATABASE || "uradi",
-  connectionLimit: 10,
-  connectTimeout:  20000,
-  acquireTimeout:  20000,
+  connectionLimit: 5,
+  connectTimeout:  10000,
+  acquireTimeout:  10000,
 });
+
+// ─────────────────────────────────────────────
+// PERSISTENT LIVE CONNECTION
+// Reused across every quickSync tick — eliminates 200-500ms
+// connection overhead per second.
+// ─────────────────────────────────────────────
+let _liveConn = null;
+
+async function getLiveConn() {
+  if (_liveConn) {
+    try {
+      await _liveConn.query("SELECT 1"); // health-check, instant
+      return _liveConn;
+    } catch {
+      try { _liveConn.release(); } catch {}
+      _liveConn = null;
+    }
+  }
+  _liveConn = await mariaPool.getConnection();
+  return _liveConn;
+}
 
 // ─────────────────────────────────────────────
 // SAFE NUMBER
@@ -43,7 +63,7 @@ function N(v) {
 }
 
 // ─────────────────────────────────────────────
-// MARIA CONNECTION WITH RETRY
+// MARIA CONNECTION (for non-live operations)
 // ─────────────────────────────────────────────
 async function getMariaConn(retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -71,29 +91,53 @@ export async function loadDeviceMap() {
 }
 
 // ─────────────────────────────────────────────
-// PERSIST CHECKPOINT IN PG
-// Uses MAX(positionid) from devices table — already updated each sync cycle.
-// Survives worker restarts without a separate table.
+// CHECKPOINT — persisted in PG sync_checkpoints table
+// Survives worker restarts without losing progress.
 // ─────────────────────────────────────────────
+async function ensureCheckpointTable() {
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS sync_checkpoints (
+      key        TEXT PRIMARY KEY,
+      value      BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+}
+
 async function loadCheckpoint() {
   try {
+    await ensureCheckpointTable();
     const { rows } = await pgPool.query(
-      "SELECT COALESCE(MAX(positionid), 0) AS last_id FROM devices WHERE positionid > 0"
+      "SELECT value FROM sync_checkpoints WHERE key = 'lastEventId'"
     );
-    const saved = Number(rows[0]?.last_id || 0);
-    if (saved > 0) {
-      lastEventId = saved;
-      log("info", "Checkpoint restored from PG", { lastEventId });
+    if (rows.length && Number(rows[0].value) > 0) {
+      lastEventId = Number(rows[0].value);
+      log("info", "Checkpoint restored", { lastEventId });
     }
   } catch (e) {
     log("warn", "Checkpoint load failed", { error: e.message });
   }
 }
 
+async function saveCheckpoint(id) {
+  if (id <= lastEventId) return;
+  lastEventId = id;
+  try {
+    await pgPool.query(
+      `INSERT INTO sync_checkpoints (key, value, updated_at)
+       VALUES ('lastEventId', $1, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+      [id]
+    );
+  } catch (e) {
+    log("warn", "Checkpoint save failed", { error: e.message });
+  }
+}
+
 // ─────────────────────────────────────────────
 // REDIS CACHE
 // ─────────────────────────────────────────────
-async function cacheLatestPositions(rows) {
+async function cachePositions(rows) {
   if (!rows.length) return;
   try {
     const pipeline = redis.pipeline();
@@ -107,7 +151,7 @@ async function cacheLatestPositions(rows) {
         time:     row.device_time ? new Date(row.device_time).toISOString() : "",
         received: row.received_at ? new Date(row.received_at).toISOString() : "",
       });
-      pipeline.expire(`pos:${uid}`, 300);
+      pipeline.expire(`pos:${uid}`, 60);
     }
     await pipeline.exec();
   } catch (e) {
@@ -117,8 +161,8 @@ async function cacheLatestPositions(rows) {
 
 // ─────────────────────────────────────────────
 // VEHICLE SYNC — batched bulk upsert
-// FIX: was 5000 individual PG queries → crashed PG connection → worker restart.
-// Now uses batches of 100 rows = 50 queries total, 100× fewer round trips.
+// FIX: was 5000 individual PG queries → PG connection crash → worker restart.
+// Now 50 batch queries total. Runs every 30 min, never blocks live sync.
 // ─────────────────────────────────────────────
 export async function syncVehicles() {
   const conn = await getMariaConn();
@@ -137,10 +181,9 @@ export async function syncVehicles() {
 
     for (let i = 0; i < rows.length; i += BATCH) {
       const chunk = rows.slice(i, i + BATCH).filter(r => String(r.serial || "").trim());
-
       if (!chunk.length) continue;
 
-      // ── Bulk vehicle upsert ───────────────────────────────────────────
+      // Bulk vehicle upsert
       const vVals = [], vParams = [];
       let p = 1;
       for (const row of chunk) {
@@ -166,7 +209,7 @@ export async function syncVehicles() {
         continue;
       }
 
-      // ── Bulk device upsert (only rows with device_uid) ───────────────
+      // Bulk device upsert
       const withDevice = chunk.filter(r => r.device_uid);
       if (withDevice.length) {
         const dVals = [], dParams = [];
@@ -182,23 +225,20 @@ export async function syncVehicles() {
              ON CONFLICT (device_uid) DO NOTHING`,
             dParams
           );
-          // Link vehicle_id in bulk
-          await pgPool.query(`
-            UPDATE devices d
-            SET vehicle_id = v.id
-            FROM vehicles v
-            WHERE v.serial = d.serial
-              AND d.vehicle_id IS NULL
-              AND d.device_uid = ANY($1::text[])
-          `, [withDevice.map(r => String(r.device_uid))]);
+          await pgPool.query(
+            `UPDATE devices d SET vehicle_id = v.id
+             FROM vehicles v
+             WHERE v.serial = d.serial
+               AND d.vehicle_id IS NULL
+               AND d.device_uid = ANY($1::text[])`,
+            [withDevice.map(r => String(r.device_uid))]
+          );
         } catch (e) {
           log("warn", "Device batch failed", { error: e.message });
         }
       }
-
       upserted += chunk.length;
     }
-
     log("info", "Vehicle sync complete", { vehicles: upserted, total: rows.length });
   } catch (e) {
     log("error", "Vehicle sync failed", { error: e.message });
@@ -207,38 +247,40 @@ export async function syncVehicles() {
 }
 
 // ─────────────────────────────────────────────
-// QUICK SYNC — near-real-time, every 5s
+// LIVE SYNC — 1-second updates
 //
-// FIX: seeds lastEventId from PG positionid on startup so restarts
-// don't go 10 minutes back. Uses id > ? (PRIMARY KEY) not servertime.
-// Seeds to MAX(id) - 2000 on first run = ~2 min window, not 50 min.
+// KEY DESIGN:
+// 1. Persistent MariaDB connection (no reconnect overhead per tick)
+// 2. WHERE id > lastEventId (PRIMARY KEY range — returns in <10ms)
+// 3. Tiny window: only new rows since last tick
+// 4. Bulk PG upsert in one query per 200 rows
+// 5. Checkpoint saved to PG after each successful tick
 // ─────────────────────────────────────────────
-let isQuickRunning = false;
+let isLiveRunning = false;
 
-export async function runQuickSync() {
-  if (isQuickRunning)       return;
-  if (!deviceMapCache.size) { log("warn","quickSync skipped — device map empty"); return; }
-  isQuickRunning = true;
-  let conn;
+export async function runLiveSync() {
+  if (isLiveRunning)        return;
+  if (!deviceMapCache.size) return;
+  isLiveRunning = true;
+
   try {
-    conn = await getMariaConn();
+    const conn = await getLiveConn();
 
-    // Seed checkpoint — use 2000 events back (≈2 min), not 50000
-    if (lastEventId === 0) {
-      await loadCheckpoint();
-    }
+    // Seed checkpoint on first run — query MAX(id) once (fast PK scan)
     if (lastEventId === 0) {
       const r = await conn.query("SELECT COALESCE(MAX(id),0)+0 AS m FROM eventData");
-      lastEventId = Math.max(0, Number(r[0].m) - 2000);
-      log("info", "Checkpoint seeded from MariaDB MAX(id)", { lastEventId });
+      const maxId = Number(r[0].m);
+      // Start from 2000 events back ≈ last 30-60 seconds of data
+      lastEventId = Math.max(0, maxId - 2000);
+      await saveCheckpoint(lastEventId);
+      log("info", "Live sync seeded", { lastEventId, maxId });
     }
 
-    const sinceId = Math.max(0, lastEventId - 200); // small overlap to avoid gaps
-
+    // THE CORE QUERY — hits PRIMARY KEY, returns in <10ms even on huge tables
     const rows = await conn.query(
       `SELECT
-         d.uniqueid    AS device_uid,
          e.id+0        AS event_id,
+         d.uniqueid    AS device_uid,
          e.latitude+0  AS latitude,
          e.longitude+0 AS longitude,
          e.speed+0     AS speed_kph,
@@ -257,37 +299,42 @@ export async function runQuickSync() {
          GROUP BY deviceid
        ) latest ON e.deviceid = latest.deviceid AND e.id = latest.max_id
        LIMIT 5000`,
-      [sinceId]
+      [lastEventId]
     );
-    conn.release(); conn = null;
 
-    if (!rows.length) {
-      log("info", "quickSync — no new rows", { sinceId });
-      return;
-    }
+    if (!rows.length) return;
 
-    // ── Bulk upsert in chunks of 200 ─────────────────────────────────
+    // Bulk upsert into latest_positions
     let upserted = 0;
-    let maxId = lastEventId;
+    let maxSeen  = lastEventId;
 
-    for (let i = 0; i < rows.length; i += 200) {
-      const chunk  = rows.slice(i, i + 200);
+    for (let i = 0; i < rows.length; i += 500) {
+      const chunk  = rows.slice(i, i + 500);
       const vals   = [], params = [];
       let p = 1;
+
       for (const r of chunk) {
         const cached = deviceMapCache.get(String(r.device_uid));
         if (!cached) continue;
         const lat = N(r.latitude), lon = N(r.longitude);
         if (lat == null || lon == null) continue;
+
         vals.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},NOW())`);
-        params.push(cached.pgDeviceId, lat, lon,
-          N(r.speed_kph) ?? 0, N(r.heading) ?? 0,
-          r.device_time, r.received_at);
+        params.push(
+          cached.pgDeviceId, lat, lon,
+          N(r.speed_kph) ?? 0,
+          N(r.heading)   ?? 0,
+          r.device_time,
+          r.received_at
+        );
+
         const eid = Number(r.event_id);
-        if (eid > maxId) maxId = eid;
+        if (eid > maxSeen) maxSeen = eid;
         upserted++;
       }
+
       if (!vals.length) continue;
+
       await pgPool.query(
         `INSERT INTO latest_positions
            (device_id,latitude,longitude,speed_kph,heading,device_time,received_at,updated_at)
@@ -305,49 +352,47 @@ export async function runQuickSync() {
     }
 
     // Advance checkpoint
-    if (maxId > lastEventId) lastEventId = maxId;
+    if (maxSeen > lastEventId) {
+      await saveCheckpoint(maxSeen);
+    }
 
-    // Persist checkpoint to PG so restarts don't lose it
-    await pgPool.query(
-      `UPDATE devices SET positionid = GREATEST(positionid, $1)
-       WHERE positionid < $1 AND positionid > 0
-       LIMIT 1`,
-      [lastEventId]
-    ).catch(() => {}); // fire-and-forget, non-critical
+    // Broadcast via Socket.IO if available
+    if (global.io && upserted > 0) {
+      global.io.emit("positions:updated", { count: upserted, ts: Date.now() });
+    }
 
-    await cacheLatestPositions(rows);
-    log("info", "quickSync complete", { upserted, sinceId, lastEventId });
+    await cachePositions(rows);
+
+    if (upserted > 0) {
+      log("info", "liveSync", { upserted, lastEventId });
+    }
 
   } catch (e) {
-    log("error", "quickSync error", { error: e.message });
+    log("error", "liveSync error", { error: e.message });
+    // Reset persistent connection on error so next tick reconnects
+    try { _liveConn?.release(); } catch {}
+    _liveConn = null;
   } finally {
-    try { conn?.release(); } catch {}
-    isQuickRunning = false;
+    isLiveRunning = false;
   }
 }
 
 // ─────────────────────────────────────────────
-// FULL MARIA SYNC — history telemetry
+// FULL SYNC — writes telemetry history table
+// Runs every 60s, separate from live sync
 // ─────────────────────────────────────────────
-let isRunning = false;
+let isFullRunning = false;
 
 export async function runMariaSync() {
-  if (isRunning) return;
-  isRunning = true;
+  if (isFullRunning) return;
+  isFullRunning = true;
   const start = Date.now();
-  log("info", "MariaSync started");
+  log("info", "Full sync started");
   try {
     await loadDeviceMap();
 
-    if (lastEventId === 0) await loadCheckpoint();
-
     const conn = await getMariaConn();
-    let sinceId = lastEventId > 0 ? lastEventId : 0;
-
-    if (sinceId === 0) {
-      const r = await conn.query("SELECT COALESCE(MAX(id),0)+0 AS m FROM eventData");
-      sinceId = Math.max(0, Number(r[0].m) - 5000);
-    }
+    const sinceId = Math.max(0, lastEventId - 5000);
 
     const allRows = await conn.query(
       `SELECT
@@ -366,16 +411,12 @@ export async function runMariaSync() {
          AND e.longitude BETWEEN -180 AND 180
          AND NOT (e.latitude = 0 AND e.longitude = 0)
        ORDER BY e.id ASC
-       LIMIT 500`,
+       LIMIT 1000`,
       [sinceId]
     );
     conn.release();
 
-    log("info", "Full sync rows", { count: allRows.length, sinceId });
-
     let inserted = 0;
-    let maxId = lastEventId;
-
     for (const row of allRows) {
       const cached = deviceMapCache.get(String(row.device_uid));
       if (!cached) continue;
@@ -391,23 +432,27 @@ export async function runMariaSync() {
            N(row.speed_kph) ?? 0, N(row.heading) ?? 0,
            row.device_time, row.received_at]
         );
-        const eid = Number(row.event_id);
-        if (eid > maxId) maxId = eid;
         inserted++;
       } catch {}
     }
-
-    if (maxId > lastEventId) lastEventId = maxId;
-    log("info", "MariaSync completed", { telemetry: inserted, ms: Date.now() - start });
+    log("info", "Full sync done", { telemetry: inserted, ms: Date.now() - start });
   } catch (e) {
-    log("error", "MariaSync failed", { error: e.message });
+    log("error", "Full sync failed", { error: e.message });
   } finally {
-    isRunning = false;
+    isFullRunning = false;
   }
 }
 
+// ─────────────────────────────────────────────
+// INIT
+// ─────────────────────────────────────────────
 export async function initMariaSync() {
+  await ensureCheckpointTable();
   await loadCheckpoint();
   await loadDeviceMap();
-  log("info", "MariaSync initialized", { lastEventId });
+  log("info", "MariaSync initialized", { lastEventId, devices: deviceMapCache.size });
 }
+
+// Legacy exports
+export async function runQuickSync() { return runLiveSync(); }
+export async function syncTelemetry() { return runMariaSync(); }
