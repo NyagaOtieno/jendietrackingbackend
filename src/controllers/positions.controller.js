@@ -22,26 +22,25 @@ function isPrivileged(req) {
 
 // ─────────────────────────────────────────────
 // BATCH: latest positions (paginated)
-// Default: 5 000 rows, max 10 000.
-// Frontend loads pages 0/1/2 in parallel to cover large fleets.
 // ─────────────────────────────────────────────
 async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
   const params = [];
 
   let sql = `
     SELECT
-      d.device_uid        AS "deviceUid",
-      d.id                AS "deviceId",
-      lp.latitude         AS lat,
-      lp.longitude        AS lon,
-      COALESCE(lp.speed_kph, 0) AS "speedKph",
+      d.device_uid                  AS "deviceUid",
+      d.id                          AS "deviceId",
+      lp.latitude                   AS lat,
+      lp.longitude                  AS lon,
+      COALESCE(lp.speed_kph, 0)     AS "speedKph",
       lp.heading,
-      lp.device_time      AS "deviceTime",
-      lp.received_at      AS "receivedAt",
-      COALESCE(v.id, 0)           AS "vehicleId",
-      COALESCE(v.plate_number,'') AS "plateNumber",
-      COALESCE(v.unit_name,'')    AS "unitName",
-      COALESCE(v.account_id, 0)   AS "accountId"
+      lp.device_time                AS "deviceTime",
+      lp.received_at                AS "receivedAt",
+      lp.updated_at                 AS "updatedAt",
+      COALESCE(v.id, 0)             AS "vehicleId",
+      COALESCE(v.plate_number, '')  AS "plateNumber",
+      COALESCE(v.unit_name, '')     AS "unitName",
+      COALESCE(v.account_id, 0)     AS "accountId"
     FROM latest_positions lp
     LEFT JOIN devices  d ON d.id = lp.device_id
     LEFT JOIN vehicles v ON v.id = d.vehicle_id
@@ -56,7 +55,7 @@ async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
   const safeLimit  = Math.min(Math.max(parseInt(limit)  || 5000, 1), 10_000);
   const safeOffset = Math.max(parseInt(offset) || 0, 0);
 
-  sql += ` ORDER BY lp.received_at DESC
+  sql += ` ORDER BY lp.updated_at DESC
            LIMIT  $${params.length + 1}
            OFFSET $${params.length + 2}`;
   params.push(safeLimit, safeOffset);
@@ -67,59 +66,63 @@ async function loadLatestFromDb(req, { limit = 5000, offset = 0 } = {}) {
 
 // ─────────────────────────────────────────────
 // SINGLE VEHICLE: latest position on-demand
-// Called when a vehicle is selected that may not appear in the batch.
-// Tries latest_positions first (fast O(1)); falls back to telemetry.
+//
+// FIX: cast vehicleId to bigint — values like 16100008574
+//      overflow integer (pg_strtoint32_safe error)
 // ─────────────────────────────────────────────
 async function loadVehicleLatestFromDb(req, vehicleId) {
   const vId = Number(vehicleId);
-  if (!vId) return null;
+  if (!vId || isNaN(vId)) return null;
 
-  const lpSql = `
-    SELECT
-      d.device_uid        AS "deviceUid",
-      d.id                AS "deviceId",
-      lp.latitude         AS lat,
-      lp.longitude        AS lon,
-      COALESCE(lp.speed_kph, 0) AS "speedKph",
-      lp.heading,
-      lp.device_time      AS "deviceTime",
-      lp.received_at      AS "receivedAt",
-      v.id                        AS "vehicleId",
-      COALESCE(v.plate_number,'') AS "plateNumber",
-      COALESCE(v.unit_name,'')    AS "unitName",
-      COALESCE(v.account_id, 0)   AS "accountId"
-    FROM latest_positions lp
-    INNER JOIN devices  d ON d.id = lp.device_id
-    INNER JOIN vehicles v ON v.id = d.vehicle_id
-    WHERE v.id = $1
-    LIMIT 1
-  `;
-  const lpResult = await query(lpSql, [vId]);
+  // Try latest_positions first (fast O(1) lookup)
+  const lpResult = await query(
+    `SELECT
+       d.device_uid                  AS "deviceUid",
+       d.id                          AS "deviceId",
+       lp.latitude                   AS lat,
+       lp.longitude                  AS lon,
+       COALESCE(lp.speed_kph, 0)     AS "speedKph",
+       lp.heading,
+       lp.device_time                AS "deviceTime",
+       lp.received_at                AS "receivedAt",
+       lp.updated_at                 AS "updatedAt",
+       v.id                          AS "vehicleId",
+       COALESCE(v.plate_number, '')  AS "plateNumber",
+       COALESCE(v.unit_name, '')     AS "unitName",
+       COALESCE(v.account_id, 0)     AS "accountId"
+     FROM latest_positions lp
+     INNER JOIN devices  d ON d.id = lp.device_id
+     INNER JOIN vehicles v ON v.id = d.vehicle_id
+     WHERE v.id = $1::bigint
+     LIMIT 1`,
+    [vId]
+  );
   if (lpResult.rows.length) return lpResult.rows[0];
 
-  // Fallback: most recent telemetry row for this vehicle
-  const telSql = `
-    SELECT
-      d.device_uid        AS "deviceUid",
-      d.id                AS "deviceId",
-      t.latitude          AS lat,
-      t.longitude         AS lon,
-      COALESCE(t.speed_kph, 0) AS "speedKph",
-      t.heading,
-      t.device_time       AS "deviceTime",
-      t.received_at       AS "receivedAt",
-      v.id                        AS "vehicleId",
-      COALESCE(v.plate_number,'') AS "plateNumber",
-      COALESCE(v.unit_name,'')    AS "unitName",
-      COALESCE(v.account_id, 0)   AS "accountId"
-    FROM telemetry t
-    INNER JOIN devices  d ON d.id = t.device_id
-    INNER JOIN vehicles v ON v.id = d.vehicle_id
-    WHERE v.id = $1
-    ORDER BY t.received_at DESC
-    LIMIT 1
-  `;
-  const telResult = await query(telSql, [vId]);
+  // Fallback: most recent telemetry row
+  const telResult = await query(
+    `SELECT
+       d.device_uid                  AS "deviceUid",
+       d.id                          AS "deviceId",
+       t.latitude                    AS lat,
+       t.longitude                   AS lon,
+       COALESCE(t.speed_kph, 0)      AS "speedKph",
+       t.heading,
+       t.device_time                 AS "deviceTime",
+       t.received_at                 AS "receivedAt",
+       t.received_at                 AS "updatedAt",
+       v.id                          AS "vehicleId",
+       COALESCE(v.plate_number, '')  AS "plateNumber",
+       COALESCE(v.unit_name, '')     AS "unitName",
+       COALESCE(v.account_id, 0)     AS "accountId"
+     FROM telemetry t
+     INNER JOIN devices  d ON d.id = t.device_id
+     INNER JOIN vehicles v ON v.id = d.vehicle_id
+     WHERE v.id = $1::bigint
+     ORDER BY t.received_at DESC
+     LIMIT 1`,
+    [vId]
+  );
   return telResult.rows[0] || null;
 }
 
@@ -139,34 +142,33 @@ async function loadHistoryFromDb(req, deviceUid, limit, from, to) {
   if (to)   { clauses.push(`t.received_at <= $${index++}`); params.push(to);   }
   params.push(limit);
 
-  const sql = `
-    SELECT
-      t.id::text          AS id,
-      d.device_uid        AS "deviceUid",
-      t.latitude          AS lat,
-      t.longitude         AS lon,
-      COALESCE(t.speed_kph, 0) AS "speedKph",
-      t.heading,
-      t.device_time       AS "deviceTime",
-      t.received_at       AS "receivedAt",
-      v.id                        AS "vehicleId",
-      v.plate_number              AS "plateNumber",
-      COALESCE(v.unit_name,'')    AS "unitName",
-      COALESCE(v.account_id, 0)   AS "accountId"
-    FROM telemetry t
-    INNER JOIN devices  d ON d.id = t.device_id
-    INNER JOIN vehicles v ON v.id = d.vehicle_id
-    WHERE ${clauses.join(" AND ")}
-    ORDER BY t.received_at DESC
-    LIMIT $${index}
-  `;
-
-  const result = await query(sql, params);
+  const result = await query(
+    `SELECT
+       t.id::text                    AS id,
+       d.device_uid                  AS "deviceUid",
+       t.latitude                    AS lat,
+       t.longitude                   AS lon,
+       COALESCE(t.speed_kph, 0)      AS "speedKph",
+       t.heading,
+       t.device_time                 AS "deviceTime",
+       t.received_at                 AS "receivedAt",
+       v.id                          AS "vehicleId",
+       v.plate_number                AS "plateNumber",
+       COALESCE(v.unit_name, '')     AS "unitName",
+       COALESCE(v.account_id, 0)     AS "accountId"
+     FROM telemetry t
+     INNER JOIN devices  d ON d.id = t.device_id
+     INNER JOIN vehicles v ON v.id = d.vehicle_id
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY t.received_at DESC
+     LIMIT $${index}`,
+    params
+  );
   return result.rows || [];
 }
 
 // ─────────────────────────────────────────────
-// EXPORTS
+// ROUTE HANDLERS
 // ─────────────────────────────────────────────
 export async function getLatestPositions(req, res) {
   try {
@@ -183,9 +185,7 @@ export async function getVehicleLatestPosition(req, res) {
   try {
     const { vehicleId } = req.params;
     const row = await loadVehicleLatestFromDb(req, vehicleId);
-    if (!row) {
-      return res.status(404).json({ success: false, message: "No position found for this vehicle" });
-    }
+    if (!row) return res.status(404).json({ success: false, message: "No position found for this vehicle" });
     return res.json({ success: true, data: row });
   } catch (err) {
     console.error("getVehicleLatestPosition error:", err);
@@ -197,14 +197,18 @@ export async function getHistory(req, res) {
   try {
     const { deviceUid, from, to } = req.query;
     const limit = normalizeLimit(req.query.limit, 200, 2000);
-    if (!deviceUid) {
-      return res.status(400).json({ success: false, message: "deviceUid is required" });
-    }
+    if (!deviceUid) return res.status(400).json({ success: false, message: "deviceUid is required" });
+
     const rows = await loadHistoryFromDb(req, deviceUid, limit, from, to);
-    const enriched = [];
-    for (const pos of rows) {
-      enriched.push({ ...pos, locationName: await safeLocationName(pos.lat, pos.lon) });
-    }
+
+    // Only geocode small sets — large sets time out the response
+    const enriched = rows.length <= 20
+      ? await Promise.all(rows.map(async pos => ({
+          ...pos,
+          locationName: await safeLocationName(pos.lat, pos.lon),
+        })))
+      : rows;
+
     return res.json({ success: true, data: enriched });
   } catch (error) {
     console.error("getHistory error:", error);
@@ -226,9 +230,7 @@ export async function createPosition(req, res) {
                  device_time AS "deviceTime", received_at AS "receivedAt"`,
       [deviceUid, lat, lon, speedKph, heading, deviceTime]
     );
-    if (!result.rows.length) {
-      return res.status(404).json({ success: false, message: "Device not found" });
-    }
+    if (!result.rows.length) return res.status(404).json({ success: false, message: "Device not found" });
     return res.status(201).json({ success: true, data: { deviceUid, ...result.rows[0] } });
   } catch (error) {
     console.error("createPosition error:", error);
@@ -249,14 +251,14 @@ export async function getPositionById(req, res) {
       FROM telemetry t
       INNER JOIN devices  d ON d.id = t.device_id
       INNER JOIN vehicles v ON v.id = d.vehicle_id
-      WHERE t.id = $1
-    `;
+      WHERE t.id = $1`;
     const params = [id];
-    if (!isPrivileged(req)) { sql += ` AND v.account_id = $2`; params.push(Number(req?.user?.accountId || 0)); }
-    const result = await query(sql, params);
-    if (!result.rows.length) {
-      return res.status(404).json({ success: false, message: "Position not found" });
+    if (!isPrivileged(req)) {
+      sql += ` AND v.account_id = $2`;
+      params.push(Number(req?.user?.accountId || 0));
     }
+    const result = await query(sql, params);
+    if (!result.rows.length) return res.status(404).json({ success: false, message: "Position not found" });
     const row = result.rows[0];
     return res.json({ success: true, data: { ...row, locationName: await safeLocationName(row.lat, row.lon) } });
   } catch (error) {
@@ -270,9 +272,7 @@ export async function updatePosition(req, res) {
     const { id } = req.params;
     const { lat, lon, speedKph, heading, deviceTime } = req.body;
     const existing = await query(`SELECT * FROM telemetry WHERE id = $1`, [id]);
-    if (!existing.rows.length) {
-      return res.status(404).json({ success: false, message: "Position not found" });
-    }
+    if (!existing.rows.length) return res.status(404).json({ success: false, message: "Position not found" });
     const cur = existing.rows[0];
     const result = await query(
       `UPDATE telemetry SET latitude=$1, longitude=$2, speed_kph=$3, heading=$4, device_time=$5
@@ -294,9 +294,7 @@ export async function deletePosition(req, res) {
   try {
     const { id } = req.params;
     const result = await query(`DELETE FROM telemetry WHERE id = $1 RETURNING id`, [id]);
-    if (!result.rows.length) {
-      return res.status(404).json({ success: false, message: "Position not found" });
-    }
+    if (!result.rows.length) return res.status(404).json({ success: false, message: "Position not found" });
     return res.json({ success: true, message: "Position deleted" });
   } catch (error) {
     console.error("deletePosition error:", error);
