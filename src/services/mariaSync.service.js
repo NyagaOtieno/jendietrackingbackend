@@ -328,8 +328,7 @@ export async function syncTelemetry() {
             device_time = EXCLUDED.device_time,
             received_at = NOW(),
             updated_at  = NOW()
-          WHERE EXCLUDED.device_time >= latest_positions.device_time
-             OR latest_positions.device_time IS NULL
+       
         `, params);
       }
       log("info", "latest_positions upserted", { count: posUpserted });
@@ -503,13 +502,15 @@ export async function runQuickSync() {
         INSERT INTO latest_positions
           (device_id,latitude,longitude,speed_kph,heading,device_time,received_at,updated_at)
         VALUES ${vals.join(",")}
-        ON CONFLICT (device_id) DO UPDATE SET
-          latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude,
-          speed_kph=EXCLUDED.speed_kph, heading=EXCLUDED.heading,
-          device_time=EXCLUDED.device_time, received_at=NOW(),
-          updated_at=NOW()
-        WHERE EXCLUDED.device_time >= latest_positions.device_time
-           OR latest_positions.device_time IS NULL
+        ON CONFLICT (device_id)
+         DO UPDATE SET
+            latitude    = EXCLUDED.latitude,
+            longitude   = EXCLUDED.longitude,
+            speed_kph   = EXCLUDED.speed_kph,
+            heading     = EXCLUDED.heading,
+            device_time = EXCLUDED.device_time,
+            received_at = NOW(),
+            updated_at  = NOW()
       `, params);
     }
     log("info", "quickSync complete", { active: rows.length, upserted });
