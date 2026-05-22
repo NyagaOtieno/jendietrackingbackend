@@ -2,92 +2,56 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import {
-  syncVehicles,
-  runMariaSync,
-  runQuickSync,
-  mariaPool,
-} from "../services/mariaSync.service.js";
+import { syncVehicles, runMariaSync, runQuickSync, mariaPool } from "../services/mariaSync.service.js";
 import { pgPool } from "../config/db.js";
 
-// ── Intervals ─────────────────────────────────────────────────────────────────
-//
-//  QUICK_INTERVAL   — how often the lightweight "last 2 min only" sync runs.
-//                     5 s = positions are at most 5 s stale in PostgreSQL.
-//                     Combined with the frontend polling every 5 s, a GPS ping
-//                     reaches the map within ~5-10 s end-to-end.
-//
-//  FULL_INTERVAL    — full MariaSync (device map + telemetry history).
-//                     Kept at 30 s; the quick sync handles freshness.
-//
-//  VEHICLE_INTERVAL — vehicle registry (plates / names). 30 min is fine.
-//
-const QUICK_INTERVAL   = Number(process.env.LIVE_SYNC_INTERVAL    ||   5_000); //  5 s ← key change
-const FULL_INTERVAL    = Number(process.env.SYNC_INTERVAL          ||  30_000); // 30 s
-const VEHICLE_INTERVAL = Number(process.env.VEHICLE_SYNC_INTERVAL || 1_800_000); // 30 min
+const QUICK_INTERVAL   = Number(process.env.LIVE_SYNC_INTERVAL    ||   4_000);
+const FULL_INTERVAL    = Number(process.env.SYNC_INTERVAL          ||  30_000);
+const VEHICLE_INTERVAL = Number(process.env.VEHICLE_SYNC_INTERVAL || 1_800_000);
 
-let quickBusy = false;
-let fullBusy  = false;
-let vehBusy   = false;
+let quickBusy = false, fullBusy = false, vehBusy = false;
 
-async function safeQuickSync() {
-  if (quickBusy) return;
-  quickBusy = true;
-  try   { await runQuickSync(); }
-  catch (e) { console.error("[Worker] quickSync error:", e.message); }
-  finally   { quickBusy = false; }
-}
+const safe = (name, fn) => async () => {
+  try   { await fn(); }
+  catch (e) { console.error(`[Worker] ${name}:`, e.message); }
+};
 
-async function safeFullSync() {
-  if (fullBusy) return;
-  fullBusy = true;
-  try   { await runMariaSync(); }
-  catch (e) { console.error("[Worker] MariaSync error:", e.message); }
-  finally   { fullBusy = false; }
-}
+const safeQuick   = safe("quickSync",   () => { if (!quickBusy) { quickBusy=true; return runQuickSync().finally(()=>quickBusy=false); } });
+const safeFull    = safe("MariaSync",   () => { if (!fullBusy)  { fullBusy=true;  return runMariaSync().finally(()=>fullBusy=false);  } });
+const safeVehicle = safe("vehicleSync", () => { if (!vehBusy)   { vehBusy=true;   return syncVehicles().finally(()=>vehBusy=false);   } });
 
-async function safeVehicleSync() {
-  if (vehBusy) return;
-  vehBusy = true;
-  try   { await syncVehicles(); }
-  catch (e) { console.error("[Worker] Vehicle sync error:", e.message); }
-  finally   { vehBusy = false; }
-}
-
-process.on("uncaughtException",  (e) => console.error("[Worker] Uncaught:", e.message));
-process.on("unhandledRejection", (e) => console.error("[Worker] Unhandled rejection:", e));
+process.on("uncaughtException",  e => console.error("[Worker] Uncaught:", e.message));
+process.on("unhandledRejection", e => console.error("[Worker] Rejection:", e));
 
 async function start() {
   const pg = await pgPool.connect(); pg.release();
   console.log("✅ PostgreSQL connected");
-
   const mc = await mariaPool.getConnection(); mc.release();
   console.log("MariaDB connected");
 
-  // 1. Vehicle registry — now then every 30 min
-  await safeVehicleSync();
-  setInterval(safeVehicleSync, VEHICLE_INTERVAL);
+  // Ensure sync infrastructure tables exist
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS sync_checkpoints (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS sync_locks       (key TEXT PRIMARY KEY, locked_at TIMESTAMPTZ DEFAULT NOW());
+  `).catch(()=>{});
 
-  // 2. Full MariaSync — starts at 5 s, every 30 s
-  //    Loads device map (required by quickSync) + writes telemetry history
-  //    With bulk ops this completes in ~3 s
+  // 1. Vehicle registry
+  await safeVehicle();
+  setInterval(safeVehicle, VEHICLE_INTERVAL);
+
+  // 2. Full sync — 5 s after boot, every 30 s
   setTimeout(() => {
-    console.log(`[Worker] Full sync every ${FULL_INTERVAL / 1000}s`);
-    safeFullSync();
-    setInterval(safeFullSync, FULL_INTERVAL);
+    console.log(`[Worker] Full sync every ${FULL_INTERVAL/1000}s`);
+    safeFull();
+    setInterval(safeFull, FULL_INTERVAL);
   }, 5_000);
 
-  // 3. Quick sync — starts at 20 s (device map guaranteed loaded by then)
-  //    runs every 5 s for near-real-time map updates
-  //    Queries MariaDB for the last 2 min of activity only → ~1 s per run
+  // 3. Quick sync — 20 s after boot (device map loaded), every 4 s
   setTimeout(() => {
-    console.log(`[Worker] Quick sync every ${QUICK_INTERVAL / 1000}s`);
-    safeQuickSync();
-    setInterval(safeQuickSync, QUICK_INTERVAL);
+    console.log(`[Worker] Quick sync every ${QUICK_INTERVAL/1000}s`);
+    safeQuick();
+    setInterval(safeQuick, QUICK_INTERVAL);
   }, 20_000);
 }
 
-start().catch((e) => {
-  console.error("[Worker] Fatal:", e.message);
-  process.exit(1);
-});
+start().catch(e => { console.error("[Worker] Fatal:", e.message); process.exit(1); });
