@@ -1,102 +1,70 @@
-// src/workers/telemetryBufferWorker.js
-
 import dotenv from "dotenv";
 dotenv.config();
 
 import {
-  syncVehicles,
   runMariaSync,
   runQuickSync,
   mariaPool,
+  syncVehicles,
   loadDeviceMap
 } from "../services/mariaSync.service.js";
 
 import { pgPool } from "../config/db.js";
 
-/* ────────────────────────────────
-   INTERVALS (1GB VPS SAFE)
-──────────────────────────────── */
-const QUICK_INTERVAL   = 15000;   // 15s
-const FULL_INTERVAL    = 60000;   // 60s
-const VEHICLE_INTERVAL = 1800000; // 30min
+const QUICK_INTERVAL = 15000;
+const FULL_INTERVAL = 60000;
+const VEHICLE_INTERVAL = 1800000;
 
-let running = {
-  quick: false,
-  full: false,
-  vehicle: false
-};
+let globalLock = false;
 
-/* ────────────────────────────────
-   SAFE RUNNER
-──────────────────────────────── */
-const safeRun = (name, flag, fn) => async () => {
-  if (running[flag]) return;
-  running[flag] = true;
+const safe = (name, fn) => async () => {
+  if (globalLock) {
+    console.log(`[Worker] Skipped ${name} (lock active)`);
+    return;
+  }
 
   try {
+    globalLock = true;
     await fn();
   } catch (e) {
-    console.error(`[Worker] ${name} error:`, e.message);
+    console.error(`[Worker] ${name}:`, e.message);
   } finally {
-    running[flag] = false;
+    globalLock = false;
   }
 };
 
-/* ────────────────────────────────
-   TASKS
-──────────────────────────────── */
-const vehicleTask = safeRun("vehicleSync", "vehicle", syncVehicles);
-const fullTask    = safeRun("fullSync", "full", runMariaSync);
-const quickTask   = safeRun("quickSync", "quick", runQuickSync);
+const safeVehicle = safe("vehicleSync", syncVehicles);
+const safeFull = safe("MariaSync", runMariaSync);
+const safeQuick = safe("quickSync", runQuickSync);
 
-/* ────────────────────────────────
-   START
-──────────────────────────────── */
 async function start() {
   try {
-    await pgPool.query(`SELECT 1`);
+    await pgPool.connect();
+    console.log("✅ PostgreSQL connected");
+
     const mc = await mariaPool.getConnection();
     mc.release();
-
-    console.log("✅ DBs connected");
+    console.log("✅ MariaDB connected");
 
     await loadDeviceMap();
 
-    await vehicleTask();
-    setInterval(vehicleTask, VEHICLE_INTERVAL);
-
+    setInterval(safeVehicle, VEHICLE_INTERVAL);
     setTimeout(() => {
       console.log(`[Worker] Full sync every ${FULL_INTERVAL / 1000}s`);
-      fullTask();
-      setInterval(fullTask, FULL_INTERVAL);
+      safeFull();
+      setInterval(safeFull, FULL_INTERVAL);
     }, 5000);
 
     setTimeout(() => {
       console.log(`[Worker] Quick sync every ${QUICK_INTERVAL / 1000}s`);
-      quickTask();
-      setInterval(quickTask, QUICK_INTERVAL);
-    }, 15000);
-
-    setInterval(() => {
-      console.log("[POOL STATUS]", {
-        maria_total: mariaPool.totalConnections?.(),
-        maria_active: mariaPool.activeConnections?.(),
-        maria_idle: mariaPool.idleConnections?.(),
-      });
-    }, 30000);
+      safeQuick();
+      setInterval(safeQuick, QUICK_INTERVAL);
+    }, 10000);
 
   } catch (e) {
     console.error("[Worker] Fatal startup error:", e.message);
-    setTimeout(start, 20000);
+    setTimeout(start, 30000);
   }
 }
-
-process.on("uncaughtException", (e) =>
-  console.error("[Worker] Uncaught:", e.message)
-);
-
-process.on("unhandledRejection", (e) =>
-  console.error("[Worker] Rejection:", e)
-);
 
 start();
