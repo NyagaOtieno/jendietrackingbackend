@@ -1,86 +1,179 @@
 // src/workers/telemetryBufferWorker.js
+import dotenv from "dotenv";
+dotenv.config();
 
-import { runQuickSync, runMariaSync } from "../services/mariaSync.service.js";
+import {
+  syncVehicles,
+  runMariaSync,
+  runQuickSync,
+  mariaPool,
+  loadDeviceMap
+} from "../services/mariaSync.service.js";
 
-const log = (level, msg, meta = {}) =>
-  console.log(JSON.stringify({ time: new Date().toISOString(), level, msg, ...meta }));
-
-let quickInterval = null;
-let fullInterval = null;
-
-let shuttingDown = false;
-
-// ─────────────────────────────────────────────────────────────
-// CONFIG (safe defaults for 512MB VPS)
-// ─────────────────────────────────────────────────────────────
-const QUICK_SYNC_MS = Number(process.env.QUICK_SYNC_MS || 10000); // 10s
-const FULL_SYNC_MS  = Number(process.env.FULL_SYNC_MS  || 60000); // 60s
+import { pgPool } from "../config/db.js";
 
 // ─────────────────────────────────────────────────────────────
-// START WORKER
+// CONFIG (reduced load for stability on small VPS)
 // ─────────────────────────────────────────────────────────────
-export function startTelemetryBufferWorker() {
-  if (quickInterval || fullInterval) {
-    log("warn", "Worker already running");
-    return;
+
+const QUICK_INTERVAL   = Number(process.env.LIVE_SYNC_INTERVAL || 10_000);  // FIXED (was 4s)
+const FULL_INTERVAL    = Number(process.env.SYNC_INTERVAL      || 60_000);  // FIXED (was 30s)
+const VEHICLE_INTERVAL = Number(process.env.VEHICLE_SYNC_INTERVAL || 1_800_000);
+
+// ─────────────────────────────────────────────────────────────
+// GLOBAL SAFETY LOCK (CRITICAL FIX)
+// prevents overlapping MariaDB + Postgres storms
+// ─────────────────────────────────────────────────────────────
+
+let globalSyncLock = false;
+
+// individual guards (still useful)
+let vehBusy = false;
+
+// ─────────────────────────────────────────────────────────────
+// SAFE WRAPPER
+// ─────────────────────────────────────────────────────────────
+
+const safe = (name, fn) => async () => {
+  try {
+    if (globalSyncLock) {
+      console.log(`[Worker] Skipped ${name} (global lock active)`);
+      return;
+    }
+    await fn();
+  } catch (e) {
+    console.error(`[Worker] ${name}:`, e.message);
   }
+};
 
-  log("info", "Telemetry Buffer Worker starting...");
+// ─────────────────────────────────────────────────────────────
+// VEHICLE SYNC (safe)
+// ─────────────────────────────────────────────────────────────
 
-  // QUICK SYNC LOOP (latest positions)
-  quickInterval = setInterval(async () => {
-    if (shuttingDown) return;
+const safeVehicle = safe("vehicleSync", async () => {
+  if (vehBusy) return;
+  vehBusy = true;
+  try {
+    await syncVehicles();
+  } finally {
+    vehBusy = false;
+  }
+});
 
-    try {
-      await runQuickSync();
-    } catch (e) {
-      log("error", "QuickSync failed", { error: e.message });
-    }
-  }, QUICK_SYNC_MS);
+// ─────────────────────────────────────────────────────────────
+// QUICK SYNC (LATEST POSITIONS)
+// ─────────────────────────────────────────────────────────────
 
-  // FULL SYNC LOOP (telemetry history + checkpoint)
-  fullInterval = setInterval(async () => {
-    if (shuttingDown) return;
+const safeQuick = safe("quickSync", async () => {
+  globalSyncLock = true;
+  try {
+    await runQuickSync();
+  } finally {
+    globalSyncLock = false;
+  }
+});
 
-    try {
-      await runMariaSync();
-    } catch (e) {
-      log("error", "MariaSync failed", { error: e.message });
-    }
-  }, FULL_SYNC_MS);
+// ─────────────────────────────────────────────────────────────
+// FULL SYNC (MARIADB → POSTGRES)
+// ─────────────────────────────────────────────────────────────
 
-  log("info", "Telemetry Buffer Worker started", {
-    quickInterval: QUICK_SYNC_MS,
-    fullInterval: FULL_SYNC_MS
-  });
+const safeFull = safe("MariaSync", async () => {
+  globalSyncLock = true;
+  try {
+    await runMariaSync();
+  } finally {
+    globalSyncLock = false;
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// ERROR HANDLERS
+// ─────────────────────────────────────────────────────────────
+
+process.on("uncaughtException", (e) =>
+  console.error("[Worker] Uncaught:", e.message)
+);
+
+process.on("unhandledRejection", (e) =>
+  console.error("[Worker] Rejection:", e)
+);
+
+// ─────────────────────────────────────────────────────────────
+// STARTUP
+// ─────────────────────────────────────────────────────────────
+
+async function start() {
+  try {
+    // sanity checks
+    const pg = await pgPool.connect();
+    pg.release();
+    console.log("✅ PostgreSQL connected");
+
+    const mc = await mariaPool.getConnection();
+    mc.release();
+    console.log("✅ MariaDB connected");
+
+    // ensure sync infra exists
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS sync_checkpoints (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS sync_locks (
+        key TEXT PRIMARY KEY,
+        locked_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `).catch(() => {});
+
+    // ─────────────────────────────
+    // 1. VEHICLE SYNC (slow)
+    // ─────────────────────────────
+
+    await safeVehicle();
+    setInterval(safeVehicle, VEHICLE_INTERVAL);
+
+    // ─────────────────────────────
+    // 2. FULL SYNC
+    // ─────────────────────────────
+
+    setTimeout(() => {
+      console.log(`[Worker] Full sync every ${FULL_INTERVAL / 1000}s`);
+      safeFull();
+      setInterval(safeFull, FULL_INTERVAL);
+    }, 5000);
+
+    // ─────────────────────────────
+    // 3. QUICK SYNC
+    // ─────────────────────────────
+
+    setTimeout(() => {
+      console.log(`[Worker] Quick sync every ${QUICK_INTERVAL / 1000}s`);
+      safeQuick();
+      setInterval(safeQuick, QUICK_INTERVAL);
+    }, 20000);
+
+    // ─────────────────────────────
+    // POOL MONITOR (DEBUG)
+    // ─────────────────────────────
+
+    setInterval(() => {
+      console.log("[POOL STATUS]", {
+        maria_total: mariaPool.totalConnections?.(),
+        maria_active: mariaPool.activeConnections?.(),
+        maria_idle: mariaPool.idleConnections?.(),
+      });
+    }, 30000);
+
+  } catch (e) {
+    console.error("[Worker] Fatal startup error:", e.message);
+
+    // IMPORTANT: retry instead of killing PM2 loop
+    setTimeout(start, 30000);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
-// STOP WORKER (GRACEFUL)
-// ─────────────────────────────────────────────────────────────
-export function stopTelemetryBufferWorker() {
-  shuttingDown = true;
 
-  if (quickInterval) clearInterval(quickInterval);
-  if (fullInterval) clearInterval(fullInterval);
-
-  quickInterval = null;
-  fullInterval = null;
-
-  log("info", "Telemetry Buffer Worker stopped");
-}
-
-// ─────────────────────────────────────────────────────────────
-// HANDLE PROCESS SIGNALS (PM2 SAFE SHUTDOWN)
-// ─────────────────────────────────────────────────────────────
-process.on("SIGINT", () => {
-  log("warn", "SIGINT received");
-  stopTelemetryBufferWorker();
-  process.exit(0);
-});
-
-process.on("SIGTERM", () => {
-  log("warn", "SIGTERM received");
-  stopTelemetryBufferWorker();
-  process.exit(0);
-});
+start();
