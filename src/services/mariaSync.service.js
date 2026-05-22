@@ -20,7 +20,7 @@ export const mariaPool = createPool({
   user:            process.env.MARIA_USER     || "root",
   password:        process.env.MARIA_PASSWORD || "",
   database:        process.env.MARIA_DB       || "uradi",
-  connectionLimit: 10,
+  connectionLimit: 3,
   connectTimeout:  15_000,
   acquireTimeout:  20_000,
   resetAfterUse:   true,

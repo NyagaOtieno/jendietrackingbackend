@@ -2,56 +2,94 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import { syncVehicles, runMariaSync, runQuickSync, mariaPool } from "../services/mariaSync.service.js";
+import { syncVehicles, runMariaSync, runQuickSync, mariaPool }
+  from "../services/mariaSync.service.js";
 import { pgPool } from "../config/db.js";
 
+// ─── Intervals ────────────────────────────────────────────────────────────────
 const QUICK_INTERVAL   = Number(process.env.LIVE_SYNC_INTERVAL    ||   4_000);
 const FULL_INTERVAL    = Number(process.env.SYNC_INTERVAL          ||  30_000);
 const VEHICLE_INTERVAL = Number(process.env.VEHICLE_SYNC_INTERVAL || 1_800_000);
 
+// ─── Guard flags ──────────────────────────────────────────────────────────────
 let quickBusy = false, fullBusy = false, vehBusy = false;
 
-const safe = (name, fn) => async () => {
+async function safeRun(name, fn, busyRef) {
+  if (busyRef.value) return;
+  busyRef.value = true;
   try   { await fn(); }
-  catch (e) { console.error(`[Worker] ${name}:`, e.message); }
-};
-
-const safeQuick   = safe("quickSync",   () => { if (!quickBusy) { quickBusy=true; return runQuickSync().finally(()=>quickBusy=false); } });
-const safeFull    = safe("MariaSync",   () => { if (!fullBusy)  { fullBusy=true;  return runMariaSync().finally(()=>fullBusy=false);  } });
-const safeVehicle = safe("vehicleSync", () => { if (!vehBusy)   { vehBusy=true;   return syncVehicles().finally(()=>vehBusy=false);   } });
-
-process.on("uncaughtException",  e => console.error("[Worker] Uncaught:", e.message));
-process.on("unhandledRejection", e => console.error("[Worker] Rejection:", e));
-
-async function start() {
-  const pg = await pgPool.connect(); pg.release();
-  console.log("✅ PostgreSQL connected");
-  const mc = await mariaPool.getConnection(); mc.release();
-  console.log("MariaDB connected");
-
-  // Ensure sync infrastructure tables exist
-  await pgPool.query(`
-    CREATE TABLE IF NOT EXISTS sync_checkpoints (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ DEFAULT NOW());
-    CREATE TABLE IF NOT EXISTS sync_locks       (key TEXT PRIMARY KEY, locked_at TIMESTAMPTZ DEFAULT NOW());
-  `).catch(()=>{});
-
-  // 1. Vehicle registry
-  await safeVehicle();
-  setInterval(safeVehicle, VEHICLE_INTERVAL);
-
-  // 2. Full sync — 5 s after boot, every 30 s
-  setTimeout(() => {
-    console.log(`[Worker] Full sync every ${FULL_INTERVAL/1000}s`);
-    safeFull();
-    setInterval(safeFull, FULL_INTERVAL);
-  }, 5_000);
-
-  // 3. Quick sync — 20 s after boot (device map loaded), every 4 s
-  setTimeout(() => {
-    console.log(`[Worker] Quick sync every ${QUICK_INTERVAL/1000}s`);
-    safeQuick();
-    setInterval(safeQuick, QUICK_INTERVAL);
-  }, 20_000);
+  catch (e) { console.error(`[Worker] ${name} error:`, e.message); }
+  finally   { busyRef.value = false; }
 }
 
-start().catch(e => { console.error("[Worker] Fatal:", e.message); process.exit(1); });
+const qBusy = { value: false };
+const fBusy = { value: false };
+const vBusy = { value: false };
+
+process.on("uncaughtException",  e => console.error("[Worker] Uncaught:", e.message));
+process.on("unhandledRejection", e => console.error("[Worker] Unhandled:", String(e)));
+
+// ─── Retry helper ─────────────────────────────────────────────────────────────
+async function withRetry(name, fn, maxTries = 5, delayMs = 3000) {
+  for (let i = 1; i <= maxTries; i++) {
+    try { return await fn(); }
+    catch (e) {
+      console.warn(`[Worker] ${name} attempt ${i}/${maxTries} failed:`, e.message);
+      if (i < maxTries) await new Promise(r => setTimeout(r, delayMs * i));
+    }
+  }
+  throw new Error(`${name} failed after ${maxTries} attempts`);
+}
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+async function start() {
+  // 1. PostgreSQL — required, retry up to 5 times
+  await withRetry("PostgreSQL connect", async () => {
+    const c = await pgPool.connect();
+    c.release();
+    console.log("✅ PostgreSQL connected");
+  });
+
+  // 2. MariaDB — also required, retry up to 5 times
+  //    DO NOT process.exit if this fails — retry instead
+  await withRetry("MariaDB connect", async () => {
+    const c = await mariaPool.getConnection();
+    c.release();
+    console.log("MariaDB connected");
+  });
+
+  // 3. Ensure infrastructure tables exist (ignore if already present)
+  try {
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS sync_checkpoints
+        (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ DEFAULT NOW());
+      CREATE TABLE IF NOT EXISTS sync_locks
+        (key TEXT PRIMARY KEY, locked_at TIMESTAMPTZ DEFAULT NOW());
+    `);
+  } catch {}
+
+  // 4. Vehicle registry — now, then every 30 min
+  safeRun("vehicleSync", syncVehicles, vBusy);
+  setInterval(() => safeRun("vehicleSync", syncVehicles, vBusy), VEHICLE_INTERVAL);
+
+  // 5. Full MariaSync — 5 s after boot (loads deviceMapCache), every 30 s
+  setTimeout(() => {
+    console.log(`[Worker] Full sync every ${FULL_INTERVAL / 1000}s`);
+    safeRun("MariaSync", runMariaSync, fBusy);
+    setInterval(() => safeRun("MariaSync", runMariaSync, fBusy), FULL_INTERVAL);
+  }, 5_000);
+
+  // 6. Quick sync — 25 s after boot (deviceMapCache loaded by then), every 4 s
+  setTimeout(() => {
+    console.log(`[Worker] Quick sync every ${QUICK_INTERVAL / 1000}s`);
+    safeRun("quickSync", runQuickSync, qBusy);
+    setInterval(() => safeRun("quickSync", runQuickSync, qBusy), QUICK_INTERVAL);
+  }, 25_000);
+}
+
+// Only exit on truly unrecoverable error — not on connection timeouts
+start().catch(e => {
+  console.error("[Worker] Fatal startup error:", e.message);
+  // Wait 10 s before exiting so PM2 doesn't hammer the DB
+  setTimeout(() => process.exit(1), 10_000);
+});
