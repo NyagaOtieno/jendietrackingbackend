@@ -18,7 +18,7 @@ export const mariaPool = createPool({
   host:            process.env.MARIA_HOST     || "18.218.110.222",
   port:     Number(process.env.MARIA_PORT)    || 3306,
   user:            process.env.MARIA_USER     || "root",
-  password:        process.env.MARIA_PASSWORD || "",
+  password:        process.env.MARIA_PASSWORD || "nairobiyetu",
   database:        process.env.MARIA_DB       || "uradi",
   connectionLimit: 10,
   connectTimeout:  15_000,
