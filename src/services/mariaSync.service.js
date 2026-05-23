@@ -336,12 +336,9 @@ export async function syncTelemetry() {
     if (conn) try { conn.release(); } catch {}
   }
 }
-// ─── CLEAN EXPORT LAYER ───
+// ─── CLEAN COMPAT LAYER ───
 
-// main sync engine
+// worker expects this
 export async function runMariaSync() {
   return syncTelemetry();
 }
-
-// optional alias for worker compatibility
-export { syncVehicles, syncTelemetry };
