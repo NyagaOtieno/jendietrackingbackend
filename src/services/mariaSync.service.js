@@ -336,9 +336,3 @@ export async function syncTelemetry() {
     if (conn) try { conn.release(); } catch {}
   }
 }
-// ─── CLEAN COMPAT LAYER ───
-
-// worker expects this
-export async function runMariaSync() {
-  return syncTelemetry();
-}
