@@ -336,3 +336,11 @@ export async function syncTelemetry() {
     if (conn) try { conn.release(); } catch {}
   }
 }
+// ─── COMPAT EXPORT WRAPPERS ───
+
+// fix legacy imports safely
+export async function runMariaSync() {
+  return syncTelemetry();
+}
+
+export { syncVehicles };
