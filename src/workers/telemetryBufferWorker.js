@@ -4,8 +4,9 @@ dotenv.config();
 import {
   syncVehicles,
   runMariaSync,
-  mariaPool
-} from "../services/mariaSync.service.js";
+  mariaPool,
+  runQuickSync
+} from "../services/mariaSync.service.js";s
 import { pgPool } from "../config/db.js";
 
 const QUICK_INTERVAL   = Number(process.env.LIVE_SYNC_INTERVAL    ||  4_000);

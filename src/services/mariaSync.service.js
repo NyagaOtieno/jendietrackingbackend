@@ -76,12 +76,12 @@ export async function syncVehicles() {
       const uid = String(r.device_uid || "").trim();
       if (!uid) continue;
 
-      await pgPool.query(`
-        INSERT INTO devices (device_uid, name)
-        VALUES ($1, $2)
-        ON CONFLICT (device_uid)
-        DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()
-      `, [uid, r.device_name || uid]);
+   await pgPool.query(`
+  INSERT INTO devices (device_uid, label)
+  VALUES ($1, $2)
+  ON CONFLICT (device_uid)
+  DO UPDATE SET label = EXCLUDED.label
+`, [uid, r.device_name || uid]);
 
       count++;
     }
