@@ -1,9 +1,11 @@
 // src/workers/telemetryBufferWorker.js
 import dotenv from "dotenv";
 dotenv.config();
-
-import { syncVehicles, runMariaSync, runQuickSync, mariaPool }
-  from "../services/mariaSync.service.js";
+import {
+  syncVehicles,
+  runMariaSync,
+  mariaPool
+} from "../services/mariaSync.service.js";
 import { pgPool } from "../config/db.js";
 
 const QUICK_INTERVAL   = Number(process.env.LIVE_SYNC_INTERVAL    ||  4_000);
