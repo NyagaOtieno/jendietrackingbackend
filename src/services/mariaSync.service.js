@@ -336,11 +336,12 @@ export async function syncTelemetry() {
     if (conn) try { conn.release(); } catch {}
   }
 }
-// ─── COMPAT EXPORT WRAPPERS ───
+// ─── CLEAN EXPORT LAYER ───
 
-// fix legacy imports safely
+// main sync engine
 export async function runMariaSync() {
   return syncTelemetry();
 }
 
-export { syncVehicles };
+// optional alias for worker compatibility
+export { syncVehicles, syncTelemetry };
