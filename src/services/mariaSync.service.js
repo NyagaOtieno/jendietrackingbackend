@@ -15,11 +15,11 @@ function N(v) {
 
 // ─── MariaDB pool ─────────────────────────────────────────────────────────────
 export const mariaPool = createPool({
-  host:            process.env.MARIA_HOST     || "localhost",
-  port:     Number(process.env.MARIA_PORT)    || 3306,
-  user:            process.env.MARIA_USER     || "root",
-  password:        process.env.MARIA_PASSWORD || "",
-  database:        process.env.MARIA_DB       || "uradi",
+  host:            process.env.MARIA_DB_HOST     || "localhost",
+  port:     Number(process.env.MARIA_DB_PORT)    || 3306,
+  user:            process.env.MARIA_DB_USER     || "root",
+  password:        process.env.MARIA_DB_PASSWORD || "",
+  database:        process.env.MARIA_DB_NAME       || "uradi",
   connectionLimit: 3,
   connectTimeout:  15_000,
   acquireTimeout:  20_000,
