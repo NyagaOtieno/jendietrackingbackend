@@ -94,3 +94,6 @@ start().catch(e => {
   console.error("[Worker] Fatal (PostgreSQL unreachable):", e.message);
   setTimeout(() => process.exit(1), 10_000);
 });
+setInterval(() => {
+  log("info", "heartbeat: telemetry-worker alive");
+}, 10000);

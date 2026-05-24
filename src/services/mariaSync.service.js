@@ -336,12 +336,12 @@ export async function syncTelemetry() {
     if (conn) try { conn.release(); } catch {}
   }
 }
-// ─── CLEAN EXPORT LAYER ───
-
-export async function runMariaSync() {
-  return syncTelemetry();
-}
-
-export async function runQuickSync() {
-  return syncTelemetry();
-}
+// CLEAN EXPORTS ONLY
+export {
+  syncVehicles,
+  syncTelemetry,
+  runMariaSync,
+  runQuickSync,
+  mariaPool,
+  getMariaConn
+};
