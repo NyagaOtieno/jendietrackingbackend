@@ -1,4 +1,3 @@
-// src/workers/telemetryBufferWorker.js
 import { pgPool } from "../config/db.js";
 import { publishTelemetryBatch } from "../queue/publisher.js";
 import { runMariaSync, syncVehicles } from "../services/mariaSync.service.js";
@@ -7,38 +6,39 @@ import { fileURLToPath } from "url";
 import path from "path";
 
 // ─────────────────────────────────────────────
-// INIT DB FIRST (SAFE STARTUP)
+// INIT
 // ─────────────────────────────────────────────
 export async function initWorkerDependencies() {
   await initMariaDB();
 }
 
 // ─────────────────────────────────────────────
-// STATE CONTROL
+// STATE
 // ─────────────────────────────────────────────
-let isRunning           = false;
-let intervalRef         = null;
-let syncIntervalRef     = null;
+let isRunning = false;
+let intervalRef = null;
+let syncIntervalRef = null;
 let vehicleSyncInterval = null;
 
-const BATCH_SIZE           = 1000;
-const INTERVAL             = 5000;        // buffer processing: every 5s
-const SYNC_INTERVAL        = 60_000;      // telemetry sync:  every 60s
-const VEHICLE_SYNC_INTERVAL = 30 * 60_000; // vehicle sync:   every 30min
-const MAX_RETRY            = 5;
+const BATCH_SIZE = 1000;
+const INTERVAL = 5000;
+const SYNC_INTERVAL = 60_000;
+const VEHICLE_SYNC_INTERVAL = 30 * 60_000;
+const MAX_RETRY = 5;
 
-// ─────────────────────────────────────────────
-// MARIA SYNC (CONTROLLED, NO DUPLICATES)
-// ─────────────────────────────────────────────
 let mariaSyncRunning = false;
 
+// ─────────────────────────────────────────────
+// SAFE MARIA SYNC
+// ─────────────────────────────────────────────
 async function safeMariaSync() {
   if (mariaSyncRunning) return;
   mariaSyncRunning = true;
+
   try {
     await runMariaSync();
   } catch (e) {
-    console.error("MariaSync error:", e.message);
+    console.error("[MariaSync Error]", e.message);
   } finally {
     mariaSyncRunning = false;
   }
@@ -48,21 +48,22 @@ async function safeVehicleSync() {
   try {
     await syncVehicles();
   } catch (e) {
-    console.error("[Worker] Vehicle sync error:", e.message);
+    console.error("[VehicleSync Error]", e.message);
   }
 }
 
 // ─────────────────────────────────────────────
-// START WORKER (buffer processing loop)
+// WORKER START
 // ─────────────────────────────────────────────
 export function startTelemetryBufferWorker() {
   console.log("🚀 Telemetry Buffer Worker started");
+
   if (intervalRef) return;
   intervalRef = setInterval(processBatch, INTERVAL);
 }
 
 // ─────────────────────────────────────────────
-// PROCESS BUFFER BATCH (FIXED SAFE LOCK)
+// PROCESS BATCH
 // ─────────────────────────────────────────────
 async function processBatch() {
   if (isRunning) return;
@@ -77,9 +78,7 @@ async function processBatch() {
       LIMIT $1
     `, [BATCH_SIZE]);
 
-    if (!rows || rows.length === 0) {
-      return; // no data — lock released in finally
-    }
+    console.log(`[Worker] Batch size: ${rows.length}`);
 
     const successIds = [];
 
@@ -89,7 +88,7 @@ async function processBatch() {
         await publishTelemetryBatch(payload);
         successIds.push(row.id);
       } catch (err) {
-        const retry  = (row.retry_count || 0) + 1;
+        const retry = (row.retry_count || 0) + 1;
         const status = retry >= MAX_RETRY ? "FAILED" : "PENDING";
 
         await pgPool.query(`
@@ -100,8 +99,7 @@ async function processBatch() {
       }
     }
 
-    // FIXED: avoid SQL error on empty array
-    if (successIds.length > 0) {
+    if (successIds.length) {
       await pgPool.query(`
         UPDATE telemetry_ingestion_buffer
         SET status = 'PROCESSED', processed_at = NOW()
@@ -109,46 +107,47 @@ async function processBatch() {
       `, [successIds]);
     }
   } catch (e) {
-    console.error("Worker error:", e.message);
+    console.error("[Worker Error]", e.message);
   } finally {
-    isRunning = false; // ALWAYS RELEASE LOCK
+    isRunning = false;
   }
 }
 
 // ─────────────────────────────────────────────
-// MASTER START
+// START SYSTEM
 // ─────────────────────────────────────────────
 export async function startSystem() {
   console.log("🚀 Starting Telemetry System...");
 
   await initWorkerDependencies();
 
-  // Buffer processing every 5s
   startTelemetryBufferWorker();
 
-  // Telemetry sync: immediate then every 60s
   await safeMariaSync();
   syncIntervalRef = setInterval(safeMariaSync, SYNC_INTERVAL);
 
-  // Vehicle sync: every 30 min
   vehicleSyncInterval = setInterval(safeVehicleSync, VEHICLE_SYNC_INTERVAL);
 
-  console.log(`[Worker] ⚡ Telemetry sync every ${SYNC_INTERVAL / 1000}s`);
-  console.log(`[Worker] ⚡ Vehicle sync every ${VEHICLE_SYNC_INTERVAL / 60000}min`);
+  console.log("[Worker] Sync active");
 }
 
 // ─────────────────────────────────────────────
-// STOP WORKER
+// STOP
 // ─────────────────────────────────────────────
 export function stopTelemetryBufferWorker() {
-  if (intervalRef)         { clearInterval(intervalRef);         intervalRef = null; }
-  if (syncIntervalRef)     { clearInterval(syncIntervalRef);     syncIntervalRef = null; }
-  if (vehicleSyncInterval) { clearInterval(vehicleSyncInterval); vehicleSyncInterval = null; }
+  clearInterval(intervalRef);
+  clearInterval(syncIntervalRef);
+  clearInterval(vehicleSyncInterval);
+
+  intervalRef = null;
+  syncIntervalRef = null;
+  vehicleSyncInterval = null;
+
   console.log("🛑 Worker stopped");
 }
 
 // ─────────────────────────────────────────────
-// SAFE AUTO-START (PM2 FRIENDLY, NON-BREAKING)
+// AUTO START
 // ─────────────────────────────────────────────
 const isMainModule =
   process.argv[1] &&
@@ -156,7 +155,7 @@ const isMainModule =
 
 if (isMainModule) {
   startSystem().catch((err) => {
-    console.error("Worker failed to start:", err);
+    console.error("Worker failed:", err);
     process.exit(1);
   });
 }
