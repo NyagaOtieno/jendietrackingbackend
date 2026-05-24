@@ -1,5 +1,5 @@
 // services/redisLatestPosition.js
-import { redis } from "../config/redisClient.js";
+import { redis } from "../config/redis.js";
 
 const TTL_SECONDS = 60;
 
