@@ -18,15 +18,12 @@ const log = (level, msg, meta = {}) =>
 // ─────────────────────────────
 // Helpers
 // ─────────────────────────────
-function key(v) {
-  return String(v || "").trim();
-}
+const key = (v) => String(v || "").trim();
 
-function N(v) {
-  if (v == null) return null;
+const N = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
-}
+};
 
 // ─────────────────────────────
 // MariaDB Pool
@@ -42,7 +39,7 @@ export const mariaPool = createPool({
   acquireTimeout: 20000,
 });
 
-export const getMariaConn = () => mariaPool.getConnection();
+const getMariaConn = () => mariaPool.getConnection();
 
 // ─────────────────────────────
 // Device Cache
@@ -59,7 +56,7 @@ export async function loadDeviceMap() {
   deviceMapCache.clear();
 
   for (const r of res.rows) {
-    deviceMapCache.set(String(r.device_uid).trim(), r.id);
+    deviceMapCache.set(key(r.device_uid), r.id);
   }
 
   log("info", "Device cache loaded", {
@@ -71,22 +68,22 @@ export async function loadDeviceMap() {
 // Checkpoint
 // ─────────────────────────────
 const CHECKPOINT_KEY = "mariasync:lastEventId";
-let _lastEventId = null;
+let cachedCheckpoint = null;
 
 async function getCheckpoint() {
-  if (_lastEventId !== null) return _lastEventId;
+  if (cachedCheckpoint !== null) return cachedCheckpoint;
 
   const r = await pgPool.query(
     "SELECT value FROM sync_checkpoints WHERE key = $1",
     [CHECKPOINT_KEY]
   );
 
-  _lastEventId = r.rows?.[0]?.value ? Number(r.rows[0].value) : 0;
-  return _lastEventId;
+  cachedCheckpoint = r.rows?.[0]?.value ? Number(r.rows[0].value) : 0;
+  return cachedCheckpoint;
 }
 
 async function saveCheckpoint(id) {
-  _lastEventId = id;
+  cachedCheckpoint = id;
 
   await pgPool.query(
     `
@@ -139,7 +136,7 @@ export async function syncVehicles() {
 }
 
 // ─────────────────────────────
-// TELEMETRY SYNC (CORE FIXED)
+// TELEMETRY SYNC (OPTIMIZED)
 // ─────────────────────────────
 export async function syncTelemetry() {
   const DEVICE_BATCH = Number(process.env.DEVICE_BATCH || 300);
@@ -160,12 +157,10 @@ export async function syncTelemetry() {
 
     log("info", "SYNC START", {
       lastEventId,
-      deviceMapSize: deviceMapCache.size,
+      devices: deviceMapCache.size,
     });
 
-    // ─────────────────────────────
-    // LATEST PER DEVICE
-    // ─────────────────────────────
+    // ───────── latest per device ─────────
     const latestRows = await conn.query(
       `
       SELECT
@@ -191,9 +186,7 @@ export async function syncTelemetry() {
       [lastEventId, sinceStr, DEVICE_BATCH]
     );
 
-    // ─────────────────────────────
-    // HISTORY
-    // ─────────────────────────────
+    // ───────── history batch ─────────
     const allRows = await conn.query(
       `
       SELECT
@@ -209,6 +202,7 @@ export async function syncTelemetry() {
       JOIN device d ON d.id = e.deviceid
       WHERE e.id > ?
         AND e.servertime > ?
+        AND NOT (e.latitude = 0 AND e.longitude = 0)
       ORDER BY e.id ASC
       LIMIT ?
     `,
@@ -218,38 +212,28 @@ export async function syncTelemetry() {
     conn.release();
 
     // ─────────────────────────────
-    // BULK INSERT TELEMETRY
+    // BULK TELEMETRY INSERT
     // ─────────────────────────────
-    const historyValues = [];
-    const historyParams = [];
-    let p = 1;
+    const values = [];
+    const params = [];
 
+    let p = 1;
     let maxId = lastEventId;
     let inserted = 0;
-    let skippedDevice = 0;
-    let skippedCoords = 0;
 
     for (const r of allRows) {
       const deviceId = deviceMapCache.get(key(r.device_uid));
-
-      if (!deviceId) {
-        skippedDevice++;
-        continue;
-      }
+      if (!deviceId) continue;
 
       const lat = N(r.latitude);
       const lon = N(r.longitude);
+      if (lat == null || lon == null) continue;
 
-      if (lat == null || lon == null) {
-        skippedCoords++;
-        continue;
-      }
-
-      historyValues.push(
-        `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`
+      values.push(
+        `($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},$${p + 6})`
       );
 
-      historyParams.push(
+      params.push(
         deviceId,
         lat,
         lon,
@@ -259,11 +243,12 @@ export async function syncTelemetry() {
         r.received_at
       );
 
-      if (r.event_id > maxId) maxId = r.event_id;
+      p += 7;
       inserted++;
+      if (r.event_id > maxId) maxId = r.event_id;
     }
 
-    if (historyValues.length) {
+    if (values.length) {
       await pgPool.query(
         `
         INSERT INTO telemetry (
@@ -275,17 +260,21 @@ export async function syncTelemetry() {
           device_time,
           received_at
         )
-        VALUES ${historyValues.join(",")}
+        VALUES ${values.join(",")}
         ON CONFLICT DO NOTHING
       `,
-        historyParams
+        params
       );
     }
 
     // ─────────────────────────────
-    // LATEST POSITIONS + REDIS
+    // LATEST POSITIONS (BULK)
     // ─────────────────────────────
-    const redisPositions = [];
+    const redisPayload = [];
+
+    const upsertValues = [];
+    const upsertParams = [];
+    let i = 1;
 
     for (const r of latestRows) {
       const deviceId = deviceMapCache.get(key(r.device_uid));
@@ -295,7 +284,7 @@ export async function syncTelemetry() {
       const lon = N(r.longitude);
       if (lat == null || lon == null) continue;
 
-      redisPositions.push({
+      redisPayload.push({
         deviceId,
         lat,
         lon,
@@ -304,6 +293,23 @@ export async function syncTelemetry() {
         dt: new Date(r.device_time),
       });
 
+      upsertValues.push(
+        `($${i},$${i + 1},$${i + 2},$${i + 3},$${i + 4},$${i + 5},NOW(),NOW())`
+      );
+
+      upsertParams.push(
+        deviceId,
+        lat,
+        lon,
+        N(r.speed_kph) ?? 0,
+        N(r.heading) ?? 0,
+        r.device_time
+      );
+
+      i += 6;
+    }
+
+    if (upsertValues.length) {
       await pgPool.query(
         `
         INSERT INTO latest_positions (
@@ -316,29 +322,22 @@ export async function syncTelemetry() {
           received_at,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
+        VALUES ${upsertValues.join(",")}
         ON CONFLICT (device_id)
         DO UPDATE SET
-          latitude=EXCLUDED.latitude,
-          longitude=EXCLUDED.longitude,
-          speed_kph=EXCLUDED.speed_kph,
-          heading=EXCLUDED.heading,
-          device_time=EXCLUDED.device_time,
-          updated_at=NOW()
+          latitude = EXCLUDED.latitude,
+          longitude = EXCLUDED.longitude,
+          speed_kph = EXCLUDED.speed_kph,
+          heading = EXCLUDED.heading,
+          device_time = EXCLUDED.device_time,
+          updated_at = NOW()
       `,
-        [
-          deviceId,
-          lat,
-          lon,
-          N(r.speed_kph) ?? 0,
-          N(r.heading) ?? 0,
-          r.device_time,
-        ]
+        upsertParams
       );
     }
 
-    if (redisPositions.length) {
-      await setLatestPositionsBatch(redisPositions);
+    if (redisPayload.length) {
+      await setLatestPositionsBatch(redisPayload);
     }
 
     if (maxId > lastEventId) {
@@ -347,13 +346,11 @@ export async function syncTelemetry() {
 
     log("info", "SYNC COMPLETE", {
       inserted,
-      skippedDevice,
-      skippedCoords,
-      latestDevices: latestRows.length,
+      latest: latestRows.length,
       checkpoint: maxId,
     });
   } catch (e) {
-    log("error", "syncTelemetry error", { error: e.message });
+    log("error", "syncTelemetry failed", { error: e.message });
   } finally {
     if (conn) conn.release();
   }
@@ -362,16 +359,16 @@ export async function syncTelemetry() {
 // ─────────────────────────────
 // MASTER SYNC
 // ─────────────────────────────
-let _syncRunning = false;
+let running = false;
 
 export async function runMariaSync() {
-  if (_syncRunning) return;
-  _syncRunning = true;
+  if (running) return;
+  running = true;
 
   try {
     await loadDeviceMap();
     await syncTelemetry();
   } finally {
-    _syncRunning = false;
+    running = false;
   }
 }
