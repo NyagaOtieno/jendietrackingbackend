@@ -6,14 +6,12 @@ import { setLatestPositionsBatch } from "./redisLatestPosition.js";
 // Logger
 // ─────────────────────────────
 const log = (level, msg, meta = {}) =>
-  console.log(
-    JSON.stringify({
-      time: new Date().toISOString(),
-      level,
-      msg,
-      ...meta,
-    })
-  );
+  console.log(JSON.stringify({
+    time: new Date().toISOString(),
+    level,
+    msg,
+    ...meta,
+  }));
 
 // ─────────────────────────────
 // Helpers
@@ -47,21 +45,25 @@ const getMariaConn = () => mariaPool.getConnection();
 export const deviceMapCache = new Map();
 
 export async function loadDeviceMap() {
-  const res = await pgPool.query(`
-    SELECT id, device_uid
-    FROM devices
-    WHERE device_uid IS NOT NULL
-  `);
+  try {
+    const res = await pgPool.query(`
+      SELECT id, device_uid
+      FROM devices
+      WHERE device_uid IS NOT NULL
+    `);
 
-  deviceMapCache.clear();
+    const rows = res?.rows || [];
 
-  for (const r of res.rows || []) {
-    deviceMapCache.set(key(r.device_uid), r.id);
+    deviceMapCache.clear();
+
+    for (const r of rows) {
+      deviceMapCache.set(key(r.device_uid), r.id);
+    }
+
+    log("info", "Device cache loaded", { count: deviceMapCache.size });
+  } catch (e) {
+    log("error", "loadDeviceMap failed", { error: e.message });
   }
-
-  log("info", "Device cache loaded", {
-    count: deviceMapCache.size,
-  });
 }
 
 // ─────────────────────────────
@@ -78,7 +80,7 @@ async function getCheckpoint() {
     [CHECKPOINT_KEY]
   );
 
-  _lastEventId = r.rows?.[0]?.value ? Number(r.rows[0].value) : 0;
+  _lastEventId = r?.rows?.[0]?.value ? Number(r.rows[0].value) : 0;
   return _lastEventId;
 }
 
@@ -97,7 +99,7 @@ async function saveCheckpoint(id) {
 }
 
 // ─────────────────────────────
-// VEHICLES
+// VEHICLES SYNC
 // ─────────────────────────────
 export async function syncVehicles() {
   let conn;
@@ -112,7 +114,7 @@ export async function syncVehicles() {
       LIMIT 5000
     `);
 
-    for (const r of rows) {
+    for (const r of rows || []) {
       const uid = key(r.device_uid);
       if (!uid) continue;
 
@@ -136,10 +138,9 @@ export async function syncVehicles() {
 }
 
 // ─────────────────────────────
-// TELEMETRY SYNC (FIXED + CLEAN)
+// TELEMETRY SYNC (FIXED)
 // ─────────────────────────────
 export async function syncTelemetry() {
-  const DEVICE_BATCH = Number(process.env.DEVICE_BATCH || 300);
   const EVENTS_BATCH = Number(process.env.EVENTS_BATCH || 1000);
   const HISTORY_HOURS = Number(process.env.HISTORY_HOURS || 2);
 
@@ -181,17 +182,14 @@ export async function syncTelemetry() {
       [lastEventId, sinceStr, EVENTS_BATCH]
     );
 
-    conn.release();
-
     const historyValues = [];
     const historyParams = [];
+    const redisBatch = [];
 
     let p = 1;
     let maxId = lastEventId;
 
-    const redisBatch = [];
-
-    for (const r of rows) {
+    for (const r of rows || []) {
       const deviceId = deviceMapCache.get(key(r.device_uid));
       if (!deviceId) continue;
 
@@ -257,14 +255,14 @@ export async function syncTelemetry() {
       checkpoint: maxId,
     });
   } catch (e) {
-  log("error", "syncTelemetry failed", { error: e.message });
-} finally {
-  if (conn) conn.release();
-}
+    log("error", "syncTelemetry failed", { error: e.message });
+  } finally {
+    if (conn) conn.release();
+  }
 }
 
 // ─────────────────────────────
-// MASTER
+// MASTER SYNC
 // ─────────────────────────────
 let running = false;
 
