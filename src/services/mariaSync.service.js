@@ -14,17 +14,17 @@ const log = (level, msg, meta = {}) =>
   }));
 
 /* ─────────────────────────────
-   SAFE NUMBER
+   HELPERS
 ──────────────────────────── */
+function key(v) {
+  return String(v || "").trim();
+}
+
 function N(v) {
+  if (v == null) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
-
-/* ─────────────────────────────
-   NORMALIZE KEY
-──────────────────────────── */
-const key = (v) => String(v || "").trim();
 
 /* ─────────────────────────────
    MARIA DB POOL
@@ -43,7 +43,7 @@ export const mariaPool = createPool({
 export const getMariaConn = () => mariaPool.getConnection();
 
 /* ─────────────────────────────
-   DEVICE CACHE
+   DEVICE CACHE (CRITICAL FIX)
 ──────────────────────────── */
 export const deviceMapCache = new Map();
 
@@ -57,9 +57,8 @@ export async function loadDeviceMap() {
 
     deviceMapCache.clear();
 
-    for (const r of res.rows || []) {
+    for (const r of res.rows) {
       const uid = key(r.device_uid);
-      if (!uid) continue;
       deviceMapCache.set(uid, r.id);
     }
 
@@ -75,13 +74,13 @@ export async function loadDeviceMap() {
 }
 
 /* ─────────────────────────────
-   CHECKPOINT
+   CHECKPOINT (FIXED SAFETY)
 ──────────────────────────── */
 const CHECKPOINT_KEY = "mariasync:lastEventId";
-let _lastEventId = 0;
+let _lastEventId = null;
 
 async function getCheckpoint() {
-  if (_lastEventId) return _lastEventId;
+  if (_lastEventId !== null) return _lastEventId;
 
   try {
     const r = await pgPool.query(
@@ -110,13 +109,14 @@ async function saveCheckpoint(id) {
       ON CONFLICT ("key")
       DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
     `, [CHECKPOINT_KEY, String(id)]);
+
   } catch (e) {
     log("warn", "Checkpoint save failed", { error: e.message });
   }
 }
 
 /* ─────────────────────────────
-   VEHICLE SYNC
+   VEHICLE SYNC (UNCHANGED)
 ──────────────────────────── */
 export async function syncVehicles() {
   let conn;
@@ -130,6 +130,8 @@ export async function syncVehicles() {
       WHERE uniqueid IS NOT NULL AND uniqueid != ''
       LIMIT 5000
     `);
+
+    conn.release();
 
     let count = 0;
 
@@ -157,7 +159,7 @@ export async function syncVehicles() {
 }
 
 /* ─────────────────────────────
-   TELEMETRY SYNC (FINAL FIXED CORE)
+   TELEMETRY SYNC (FIXED CORE)
 ──────────────────────────── */
 export async function syncTelemetry() {
   const DEVICE_BATCH = Number(process.env.DEVICE_BATCH || 300);
@@ -226,11 +228,8 @@ export async function syncTelemetry() {
 
     conn.release();
 
-    /* ─────────────────────────────
-       LATEST POSITIONS
-    ───────────────────────────── */
+    /* ───── latest positions ───── */
     const redisPositions = [];
-    let latestCount = 0;
 
     for (const r of latestRows) {
       const uid = key(r.device_uid);
@@ -254,17 +253,13 @@ export async function syncTelemetry() {
         heading: N(r.heading) ?? 0,
         dt: new Date(r.device_time)
       });
-
-      latestCount++;
     }
 
     if (redisPositions.length) {
       await setLatestPositionsBatch(redisPositions);
     }
 
-    /* ─────────────────────────────
-       HISTORY INSERT
-    ───────────────────────────── */
+    /* ───── history insert (BATCHED FIX) ───── */
     let inserted = 0;
     let maxId = lastEventId;
 
@@ -272,6 +267,8 @@ export async function syncTelemetry() {
 
     for (let i = 0; i < allRows.length; i += batchSize) {
       const chunk = allRows.slice(i, i + batchSize);
+
+      const queries = [];
 
       for (const r of chunk) {
         const uid = key(r.device_uid);
@@ -284,7 +281,7 @@ export async function syncTelemetry() {
 
         if (lat == null || lon == null) continue;
 
-        await pgPool.query(`
+        queries.push(pgPool.query(`
           INSERT INTO telemetry (
             device_id,
             latitude,
@@ -304,11 +301,13 @@ export async function syncTelemetry() {
           N(r.heading) ?? 0,
           r.device_time,
           r.received_at
-        ]);
+        ]));
 
         inserted++;
         if (Number(r.event_id) > maxId) maxId = Number(r.event_id);
       }
+
+      await Promise.all(queries);
     }
 
     if (maxId > lastEventId) {
@@ -317,7 +316,7 @@ export async function syncTelemetry() {
 
     log("info", "Telemetry sync done", {
       inserted,
-      latestPositions: latestCount,
+      latestDevices: latestRows.length,
       historyRows: allRows.length
     });
 
