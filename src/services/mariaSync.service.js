@@ -257,10 +257,10 @@ export async function syncTelemetry() {
       checkpoint: maxId,
     });
   } catch (e) {
-    log("error", "syncTelemetry failed", { error: e.message });
-  } finally {
-    if (conn) conn.release();
-  }
+  log("error", "syncTelemetry failed", { error: e.message });
+} finally {
+  if (conn) conn.release();
+}
 }
 
 // ─────────────────────────────
