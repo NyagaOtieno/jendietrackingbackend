@@ -58,7 +58,7 @@ export async function loadDeviceMap() {
 }
 
 // ─────────────────────────────
-// Checkpoint (FIXED)
+// CHECKPOINT
 // ─────────────────────────────
 const CHECKPOINT_KEY = "mariasync:lastEventId";
 let _lastEventId = null;
@@ -87,7 +87,7 @@ async function saveCheckpoint(id) {
 }
 
 // ─────────────────────────────
-// VEHICLE SYNC (unchanged but safe)
+// VEHICLE SYNC (UNCHANGED SAFE)
 // ─────────────────────────────
 export async function syncVehicles() {
   let conn;
@@ -147,7 +147,7 @@ export async function syncTelemetry() {
 
     log("info", "Fetching events", { lastEventId });
 
-    // ───── fetch latest per device ─────
+    // ───── latest per device ─────
     const latestRows = await conn.query(`
       SELECT
         d.uniqueid AS device_uid,
@@ -173,7 +173,7 @@ export async function syncTelemetry() {
       LIMIT ?
     `, [lastEventId, sinceStr, DEVICE_BATCH]);
 
-    // ───── fetch history batch ─────
+    // ───── history batch ─────
     const allRows = await conn.query(`
       SELECT
         d.uniqueid AS device_uid,
@@ -198,12 +198,12 @@ export async function syncTelemetry() {
     conn.release();
 
     // ─────────────────────────────
-    // BULK INSERT (FIXED PERFORMANCE)
+    // FIXED BULK INSERT (CORRECT INDEXING)
     // ─────────────────────────────
     const historyValues = [];
     const historyParams = [];
-    let p = 1;
 
+    let p = 1;
     let maxId = lastEventId;
     let inserted = 0;
 
@@ -213,11 +213,10 @@ export async function syncTelemetry() {
 
       const lat = N(r.latitude);
       const lon = N(r.longitude);
-
       if (lat == null || lon == null) continue;
 
       historyValues.push(
-        `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`
+        `($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},$${p+6})`
       );
 
       historyParams.push(
@@ -230,12 +229,14 @@ export async function syncTelemetry() {
         r.received_at
       );
 
+      p += 7;
+
       if (r.event_id > maxId) maxId = r.event_id;
       inserted++;
     }
 
     if (historyValues.length) {
-      await pgPool.query(`
+      const result = await pgPool.query(`
         INSERT INTO telemetry (
           device_id,
           latitude,
@@ -248,10 +249,20 @@ export async function syncTelemetry() {
         VALUES ${historyValues.join(",")}
         ON CONFLICT DO NOTHING
       `, historyParams);
+
+      log("info", "Telemetry inserted", {
+        inserted,
+        rowCount: result.rowCount
+      });
     }
 
-    // ───── latest positions (unchanged but safe) ─────
-    const redisPositions = [];
+    // ─────────────────────────────
+    // FIXED latest_positions BULK UPSERT
+    // ─────────────────────────────
+    const latestValues = [];
+    const latestParams = [];
+
+    let i = 1;
 
     for (const r of latestRows) {
       const deviceId = deviceMapCache.get(key(r.device_uid));
@@ -261,15 +272,23 @@ export async function syncTelemetry() {
       const lon = N(r.longitude);
       if (lat == null || lon == null) continue;
 
-      redisPositions.push({
+      latestValues.push(
+        `($${i},$${i+1},$${i+2},$${i+3},$${i+4},$${i+5})`
+      );
+
+      latestParams.push(
         deviceId,
         lat,
         lon,
-        speed: N(r.speed_kph) ?? 0,
-        heading: N(r.heading) ?? 0,
-        dt: new Date(r.device_time)
-      });
+        N(r.speed_kph) ?? 0,
+        N(r.heading) ?? 0,
+        r.device_time
+      );
 
+      i += 6;
+    }
+
+    if (latestValues.length) {
       await pgPool.query(`
         INSERT INTO latest_positions (
           device_id,
@@ -281,7 +300,7 @@ export async function syncTelemetry() {
           received_at,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
+        VALUES ${latestValues.join(",")}
         ON CONFLICT (device_id)
         DO UPDATE SET
           latitude=EXCLUDED.latitude,
@@ -290,18 +309,18 @@ export async function syncTelemetry() {
           heading=EXCLUDED.heading,
           device_time=EXCLUDED.device_time,
           updated_at=NOW()
-      `, [
-        deviceId,
-        lat,
-        lon,
-        N(r.speed_kph) ?? 0,
-        N(r.heading) ?? 0,
-        r.device_time
-      ]);
-    }
+      `, latestParams);
 
-    if (redisPositions.length) {
-      await setLatestPositionsBatch(redisPositions);
+      await setLatestPositionsBatch(
+        latestRows.map(r => ({
+          deviceId: deviceMapCache.get(key(r.device_uid)),
+          lat: N(r.latitude),
+          lon: N(r.longitude),
+          speed: N(r.speed_kph) ?? 0,
+          heading: N(r.heading) ?? 0,
+          dt: new Date(r.device_time)
+        }))
+      );
     }
 
     if (maxId > lastEventId) {
