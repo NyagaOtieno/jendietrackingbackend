@@ -17,17 +17,14 @@ const log = (level, msg, meta = {}) =>
    SAFE NUMBER
 ──────────────────────────── */
 function N(v) {
-  if (v == null) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
 
 /* ─────────────────────────────
-   KEY NORMALIZER (CRITICAL FIX)
+   NORMALIZE KEY
 ──────────────────────────── */
-function key(v) {
-  return String(v || "").trim();
-}
+const key = (v) => String(v || "").trim();
 
 /* ─────────────────────────────
    MARIA DB POOL
@@ -46,7 +43,7 @@ export const mariaPool = createPool({
 export const getMariaConn = () => mariaPool.getConnection();
 
 /* ─────────────────────────────
-   DEVICE CACHE (CRITICAL)
+   DEVICE CACHE
 ──────────────────────────── */
 export const deviceMapCache = new Map();
 
@@ -60,8 +57,10 @@ export async function loadDeviceMap() {
 
     deviceMapCache.clear();
 
-    for (const r of res.rows) {
-      deviceMapCache.set(key(r.device_uid), r.id);
+    for (const r of res.rows || []) {
+      const uid = key(r.device_uid);
+      if (!uid) continue;
+      deviceMapCache.set(uid, r.id);
     }
 
     log("info", "Device cache loaded", {
@@ -76,7 +75,7 @@ export async function loadDeviceMap() {
 }
 
 /* ─────────────────────────────
-   CHECKPOINT SAFE
+   CHECKPOINT
 ──────────────────────────── */
 const CHECKPOINT_KEY = "mariasync:lastEventId";
 let _lastEventId = 0;
@@ -111,7 +110,6 @@ async function saveCheckpoint(id) {
       ON CONFLICT ("key")
       DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
     `, [CHECKPOINT_KEY, String(id)]);
-
   } catch (e) {
     log("warn", "Checkpoint save failed", { error: e.message });
   }
@@ -132,8 +130,6 @@ export async function syncVehicles() {
       WHERE uniqueid IS NOT NULL AND uniqueid != ''
       LIMIT 5000
     `);
-
-    conn.release();
 
     let count = 0;
 
@@ -161,7 +157,7 @@ export async function syncVehicles() {
 }
 
 /* ─────────────────────────────
-   TELEMETRY SYNC (MAIN FIXED CORE)
+   TELEMETRY SYNC (FINAL FIXED CORE)
 ──────────────────────────── */
 export async function syncTelemetry() {
   const DEVICE_BATCH = Number(process.env.DEVICE_BATCH || 300);
@@ -241,7 +237,7 @@ export async function syncTelemetry() {
       const deviceId = deviceMapCache.get(uid);
 
       if (!deviceId) {
-        log("warn", "UNMAPPED DEVICE UID", { uid });
+        log("warn", "UNMAPPED DEVICE", { uid });
         continue;
       }
 
@@ -267,7 +263,7 @@ export async function syncTelemetry() {
     }
 
     /* ─────────────────────────────
-       HISTORY INSERT (BATCHED SAFE)
+       HISTORY INSERT
     ───────────────────────────── */
     let inserted = 0;
     let maxId = lastEventId;
