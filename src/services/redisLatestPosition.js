@@ -1,95 +1,80 @@
-import {
-  redis,
-  redisPub
-} from "../config/redis.js";
+import { redis, redisPub } from "../config/redis.js";
 
-const TTL_SECONDS=60;
+const TTL_SECONDS = 60;
 
-export async function setLatestPositionsBatch(
-  positions
-){
+/**
+ * SAFE BATCH UPSERT TO REDIS
+ */
+export async function setLatestPositionsBatch(positions = []) {
+  if (!positions.length) return;
 
-try{
+  try {
+    const pipeline = redis.pipeline();
 
-const pipeline=redis.multi();
+    for (const p of positions) {
+      if (!p?.deviceId) continue;
 
-for(const p of positions){
+      const key = `vehicle:${p.deviceId}:latest`;
 
-const key=
-`vehicle:${p.deviceId}:latest`;
+      pipeline.hset(key, {
+        lat: p.lat ?? 0,
+        lng: p.lon ?? 0,
+        speed: p.speed ?? 0,
+        heading: p.heading ?? 0,
+        timestamp: p.dt ? p.dt.getTime() : Date.now(),
+      });
 
-pipeline.hSet(key,{
-lat:p.lat,
-lng:p.lon,
-speed:p.speed,
-heading:p.heading,
-timestamp:p.dt.getTime()
-});
+      pipeline.expire(key, TTL_SECONDS);
+    }
 
-pipeline.expire(
-key,
-TTL_SECONDS
-);
+    await pipeline.exec();
 
+    try {
+      await redisPub.publish(
+        "vehicle_updates",
+        JSON.stringify(positions)
+      );
+    } catch (pubErr) {
+      console.error("Redis pub failed:", pubErr.message);
+    }
+  } catch (err) {
+    console.error("Redis batch failed:", err.message);
+  }
 }
 
-await pipeline.exec();
+/**
+ * GET SINGLE POSITION
+ */
+export async function getLatestPosition(deviceId) {
+  if (!deviceId) return null;
 
-await redisPub.publish(
-"vehicle_updates",
-JSON.stringify(
-positions
-)
-);
-
-}
-catch(err){
-
-console.error(
-"Redis batch failed:",
-err.message
-);
-
+  return await redis.hgetall(`vehicle:${deviceId}:latest`);
 }
 
-}
+/**
+ * BULK FETCH POSITIONS
+ */
+export async function getLatestPositionsBulk(deviceIds = []) {
+  if (!deviceIds.length) return [];
 
-export async function getLatestPosition(
-deviceId
-){
+  const pipeline = redis.pipeline();
 
-return redis.hGetAll(
-`vehicle:${deviceId}:latest`
-);
+  for (const id of deviceIds) {
+    pipeline.hgetall(`vehicle:${id}:latest`);
+  }
 
-}
+  const results = await pipeline.exec();
 
-export async function getLatestPositionsBulk(
-deviceIds
-){
+  return results.map((r, i) => {
+    const data = r?.[1] || {};
 
-const pipeline=
-redis.multi();
-
-deviceIds.forEach(id=>{
-
-pipeline.hGetAll(
-`vehicle:${id}:latest`
-);
-
-});
-
-const results=
-await pipeline.exec();
-
-return results.map(
-(r,i)=>({
-
-deviceId:deviceIds[i],
-
-...(r[1]||{})
-
-})
-);
-
+    return {
+      deviceId: deviceIds[i],
+      lat: data.lat ? Number(data.lat) : null,
+      lng: data.lng ? Number(data.lng) : null,
+      speed: data.speed ? Number(data.speed) : 0,
+      heading: data.heading ? Number(data.heading) : 0,
+      timestamp: data.timestamp ? Number(data.timestamp) : null,
+    };
+  });
 }
