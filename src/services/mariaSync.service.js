@@ -1,6 +1,7 @@
 // src/services/mariaSync.service.js
 import { createPool } from "mariadb";
 import { pgPool }     from "../config/db.js";
+import { setLatestPositionsBatch } from "./redisLatestPosition.js";
 
 const log = (level, msg, meta = {}) =>
   console.log(JSON.stringify({ time: new Date().toISOString(), level, msg, ...meta }));
@@ -210,7 +211,97 @@ export async function syncTelemetry() {
       }
       log("info", "latest_positions upserted", { count });
     }
+// ── Bulk upsert latest_positions + Redis realtime ─────────────
+{
+  let count = 0;
+  const redisPositions = [];
 
+  for (let i = 0; i < latestRows.length; i += 200) {
+    const chunk = latestRows.slice(i, i + 200);
+
+    const vals = [];
+    const params = [];
+    let p = 1;
+
+    for (const r of chunk) {
+      const cached = deviceMapCache.get(String(r.device_uid));
+
+      if (!cached) continue;
+
+      const lat = N(r.latitude);
+      const lon = N(r.longitude);
+
+      if (lat == null || lon == null) continue;
+
+      vals.push(
+        `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},NOW(),NOW())`
+      );
+
+      params.push(
+        cached.pgDeviceId,
+        lat,
+        lon,
+        N(r.speed_kph) ?? 0,
+        N(r.heading) ?? 0,
+        r.device_time
+      );
+
+      redisPositions.push({
+        deviceId: cached.pgDeviceId,
+        lat,
+        lon,
+        speed: N(r.speed_kph) ?? 0,
+        heading: N(r.heading) ?? 0,
+        dt: new Date(r.device_time)
+      });
+
+      count++;
+    }
+
+    if (!vals.length) continue;
+
+    await pgPool.query(`
+      INSERT INTO latest_positions
+      (
+        device_id,
+        latitude,
+        longitude,
+        speed_kph,
+        heading,
+        device_time,
+        received_at,
+        updated_at
+      )
+      VALUES ${vals.join(",")}
+      ON CONFLICT(device_id)
+      DO UPDATE SET
+        latitude=EXCLUDED.latitude,
+        longitude=EXCLUDED.longitude,
+        speed_kph=EXCLUDED.speed_kph,
+        heading=EXCLUDED.heading,
+        device_time=EXCLUDED.device_time,
+        received_at=NOW(),
+        updated_at=NOW()
+    `, params);
+  }
+
+  // Redis batch update
+  if (redisPositions.length) {
+      await setLatestPositionsBatch(redisPositions);
+
+      log(
+        "info",
+        "Redis realtime updated",
+        {count:redisPositions.length}
+      );
+  }
+
+  log(
+      "info",
+      "latest_positions upserted",
+      {count}
+  );
+}
     // ── Bulk insert telemetry history ─────────────────────────────────────────
     let maxId = lastEventId, inserted = 0;
     for (let i = 0; i < allRows.length; i += 200) {

@@ -12,6 +12,7 @@ import { initWebSocket } from "./socket/server.js";
 import { testDbConnection } from "./config/db.js";
 import { initQueue } from "./queue/index.js";
 import { initDb } from "./config/initDb.js";
+import { initRedis } from "./config/redis.js";
 
 import positionsRoutes from "./routes/positions.routes.js";
 import fleetRoutes from "./routes/fleet.routes.js";
@@ -25,6 +26,7 @@ import telemetryRoutes from "./routes/telemetry.routes.js";
 import usersRoutes from "./routes/users.routes.js";
 
 await initDb();
+await initRedis();
 
 const app = express();
 const server = http.createServer(app);
