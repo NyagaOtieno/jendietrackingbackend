@@ -32,7 +32,28 @@ const app = express();
 const server = http.createServer(app);
 const io = initWebSocket(server);
 global.io = io;
+import { redisSub } from "./config/redis.js";
 
+await redisSub.subscribe(
+"vehicle_updates",
+(message)=>{
+
+const updates=
+JSON.parse(message);
+
+updates.forEach(vehicle=>{
+
+io.to(
+`vehicle:${vehicle.deviceId}`
+).emit(
+"positionUpdate",
+vehicle
+);
+
+});
+
+}
+);
 // BLOCK SENSITIVE PATHS — must be AFTER const app = express()
 app.use((req, res, next) => {
   const blocked = [".env", ".git", ".bash_history", "config.js"];

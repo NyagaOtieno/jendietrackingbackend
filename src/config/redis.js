@@ -2,53 +2,49 @@ import { createClient } from "redis";
 
 export const redis = createClient({
   url: process.env.REDIS_URL || "redis://127.0.0.1:6379",
+
   socket: {
-    reconnectStrategy: (retries) => {
-      // exponential backoff (prevents CPU spike)
-      return Math.min(retries * 50, 2000);
-    },
-  },
-});
-
-redis.on("error", (err) => {
-  console.error("❌ Redis Error:", err.message);
-});
-
-redis.on("connect", () => {
-  console.log("⚡ Redis connecting...");
-});
-
-redis.on("ready", () => {
-  console.log("✅ Redis ready");
-});
-
-redis.on("end", () => {
-  console.log("⚠️ Redis connection closed");
-});
-
-// ─────────────────────────────
-// INIT SAFE CONNECTION
-// ─────────────────────────────
-export async function initRedis() {
-  try {
-    if (!redis.isOpen) {
-      await redis.connect();
+    reconnectStrategy(retries) {
+      return Math.min(retries * 100, 3000);
     }
-  } catch (err) {
-    console.error("❌ Redis init failed:", err.message);
-    throw err;
+  }
+});
+
+export const redisPub = redis.duplicate();
+export const redisSub = redis.duplicate();
+
+function register(client, name) {
+  client.on("connect", () =>
+    console.log(`⚡ Redis ${name} connecting`)
+  );
+
+  client.on("ready", () =>
+    console.log(`✅ Redis ${name} ready`)
+  );
+
+  client.on("error", err =>
+    console.error(`❌ Redis ${name}:`, err.message)
+  );
+}
+
+register(redis, "main");
+register(redisPub, "pub");
+register(redisSub, "sub");
+
+export async function initRedis() {
+  const clients = [redis, redisPub, redisSub];
+
+  for (const client of clients) {
+    if (!client.isOpen) {
+      await client.connect();
+    }
   }
 }
 
-// ─────────────────────────────
-// SAFE SHUTDOWN HOOK (IMPORTANT)
-// ─────────────────────────────
 export async function closeRedis() {
-  try {
-    if (redis.isOpen) {
-      await redis.quit();
-    }
-  } catch (err) {
-    console.error("❌ Redis close error:", err.message);
-  }
+  await Promise.all(
+    [redis, redisPub, redisSub]
+      .filter(c => c.isOpen)
+      .map(c => c.quit())
+  );
 }

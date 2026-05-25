@@ -18,6 +18,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "amqplib": "^1.0.3",
     "axios": "^1.8.4",
     "bcryptjs": "^2.4.3",
