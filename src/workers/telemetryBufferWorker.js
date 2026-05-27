@@ -1,12 +1,15 @@
+import "dotenv/config";
+
 import { pgPool } from "../config/db.js";
-import { publishTelemetryBatch } from "../queue/publisher.js";
 import { runMariaSync, syncVehicles } from "../services/mariaSync.service.js";
+import { setLatestPositionsBatch } from "../services/redisLatestPosition.js";
+import { initRedis } from "../config/redis.js";
 
 let isRunning = false;
 
-const INTERVAL = 5000;
-const SYNC_INTERVAL = 60000;
-const VEHICLE_INTERVAL = 1800000;
+const INTERVAL         = 5000;    // process buffer every 5s
+const SYNC_INTERVAL    = 60000;   // MariaDB sync every 60s
+const VEHICLE_INTERVAL = 1800000; // vehicle sync every 30min
 
 let batchTimer;
 let syncTimer;
@@ -14,24 +17,11 @@ let vehicleTimer;
 
 const MAX_RETRY = 5;
 
-export function startTelemetryBufferWorker() {
-  console.log("🚀 Telemetry Buffer Worker started");
-
-  if (batchTimer) return;
-
-  batchTimer = setInterval(processBatch, INTERVAL);
-
-  // Maria sync loop
-  syncTimer = setInterval(async () => {
-    await runMariaSync();
-  }, SYNC_INTERVAL);
-
-  // vehicle sync loop
-  vehicleTimer = setInterval(async () => {
-    await syncVehicles();
-  }, VEHICLE_INTERVAL);
-}
-
+// ─────────────────────────────────────────────────────────────────────────────
+// BATCH PROCESSOR
+// Reads PENDING rows from telemetry_ingestion_buffer, writes them to
+// telemetry + latest_positions in Postgres, then updates Redis.
+// ─────────────────────────────────────────────────────────────────────────────
 async function processBatch() {
   if (isRunning) return;
   isRunning = true;
@@ -45,50 +35,144 @@ async function processBatch() {
       LIMIT 1000
     `);
 
-    const success = [];
+    if (!rows.length) return;
+
+    const success      = [];
+    const redisBatch   = [];
 
     for (const row of rows) {
       try {
         const payload = JSON.parse(row.payload);
-        await publishTelemetryBatch(payload);
+
+        // Support both single-object and batched payloads
+        const items = Array.isArray(payload.batch) ? payload.batch : [payload];
+
+        for (const item of items) {
+          const {
+            deviceId,
+            latitude,
+            longitude,
+            speed     = 0,
+            heading   = 0,
+            signalTime = null,
+          } = item;
+
+          if (!deviceId || latitude == null || longitude == null) continue;
+
+          // Insert telemetry row
+          await pgPool.query(
+            `INSERT INTO telemetry
+               (device_id, latitude, longitude, speed_kph, heading, device_time)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT DO NOTHING`,
+            [deviceId, Number(latitude), Number(longitude), Number(speed), Number(heading),
+             signalTime ? new Date(signalTime) : null]
+          );
+
+          // Upsert latest_positions
+          await pgPool.query(
+            `INSERT INTO latest_positions
+               (device_id, latitude, longitude, speed_kph, heading, device_time, received_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+             ON CONFLICT (device_id) DO UPDATE SET
+               latitude    = EXCLUDED.latitude,
+               longitude   = EXCLUDED.longitude,
+               speed_kph   = EXCLUDED.speed_kph,
+               heading     = EXCLUDED.heading,
+               device_time = EXCLUDED.device_time,
+               received_at = NOW(),
+               updated_at  = NOW()
+             WHERE EXCLUDED.device_time >= latest_positions.device_time
+                OR latest_positions.device_time IS NULL`,
+            [deviceId, Number(latitude), Number(longitude), Number(speed), Number(heading),
+             signalTime ? new Date(signalTime) : null]
+          );
+
+          redisBatch.push({
+            deviceId,
+            lat: Number(latitude),
+            lon: Number(longitude),
+            speed: Number(speed),
+            heading: Number(heading),
+            dt: signalTime ? new Date(signalTime) : new Date(),
+          });
+        }
+
         success.push(row.id);
       } catch (e) {
-        const retry = (row.retry_count || 0) + 1;
+        const retry  = (row.retry_count || 0) + 1;
         const status = retry >= MAX_RETRY ? "FAILED" : "PENDING";
-
-        await pgPool.query(`
-          UPDATE telemetry_ingestion_buffer
-          SET retry_count = $2,
-              status = $3
-          WHERE id = $1
-        `, [row.id, retry, status]);
+        console.error(`[Worker] Row ${row.id} failed (attempt ${retry}):`, e.message);
+        await pgPool.query(
+          `UPDATE telemetry_ingestion_buffer
+           SET retry_count = $2, status = $3
+           WHERE id = $1`,
+          [row.id, retry, status]
+        );
       }
     }
 
+    // Mark processed rows
     if (success.length) {
-      await pgPool.query(`
-        UPDATE telemetry_ingestion_buffer
-        SET status = 'PROCESSED',
-            processed_at = NOW()
-        WHERE id = ANY($1)
-      `, [success]);
+      await pgPool.query(
+        `UPDATE telemetry_ingestion_buffer
+         SET status = 'PROCESSED', processed_at = NOW()
+         WHERE id = ANY($1)`,
+        [success]
+      );
+      console.log(`[Worker] Processed ${success.length} buffer rows`);
     }
 
+    // Push latest positions to Redis
+    if (redisBatch.length) {
+      await setLatestPositionsBatch(redisBatch);
+    }
   } catch (e) {
-    console.error("[Worker Error]", e.message);
+    console.error("[Worker] processBatch error:", e.message);
   } finally {
     isRunning = false;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// START / STOP
+// ─────────────────────────────────────────────────────────────────────────────
+export function startTelemetryBufferWorker() {
+  console.log("🚀 Telemetry Buffer Worker started");
+  if (batchTimer) return;
+
+  batchTimer   = setInterval(processBatch,          INTERVAL);
+  syncTimer    = setInterval(() => runMariaSync(),   SYNC_INTERVAL);
+  vehicleTimer = setInterval(() => syncVehicles(),   VEHICLE_INTERVAL);
+
+  // Run immediately on start
+  processBatch();
+  runMariaSync();
 }
 
 export function stopTelemetryBufferWorker() {
   clearInterval(batchTimer);
   clearInterval(syncTimer);
   clearInterval(vehicleTimer);
-
-  batchTimer = null;
-  syncTimer = null;
-  vehicleTimer = null;
-
+  batchTimer = syncTimer = vehicleTimer = null;
   console.log("🛑 Worker stopped");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BOOTSTRAP — runs when executed directly via PM2 / node
+// ─────────────────────────────────────────────────────────────────────────────
+async function main() {
+  try {
+    await initRedis();
+    console.log("✅ Redis connected");
+  } catch (e) {
+    console.warn("⚠️  Redis unavailable, continuing without it:", e.message);
+  }
+
+  startTelemetryBufferWorker();
+
+  process.on("SIGINT",  () => { stopTelemetryBufferWorker(); process.exit(0); });
+  process.on("SIGTERM", () => { stopTelemetryBufferWorker(); process.exit(0); });
+}
+
+main();
