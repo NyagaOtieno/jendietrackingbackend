@@ -27,108 +27,157 @@ async function processBatch() {
   isRunning = true;
 
   try {
-    const { rows } = await pgPool.query(`
-      SELECT id, payload, retry_count
-      FROM telemetry_ingestion_buffer
-      WHERE status = 'PENDING'
-      ORDER BY created_at ASC
-      LIMIT 1000
-    `);
+    let rows = [];
 
-    if (!rows.length) return;
+    // ─────────────────────────────
+    // SAFE DB READ (NO CRASH MODE)
+    // ─────────────────────────────
+    try {
+      const result = await pgPool.query(`
+        SELECT id, payload, retry_count
+        FROM telemetry_ingestion_buffer
+        WHERE status = 'PENDING'
+        ORDER BY created_at ASC
+        LIMIT 1000
+      `);
 
-    const success      = [];
-    const redisBatch   = [];
+      rows = result.rows || [];
+    } catch (dbErr) {
+      if (dbErr.message.includes("does not exist")) {
+        console.warn(
+          "[Worker] telemetry_ingestion_buffer missing → running in IDLE MODE"
+        );
+        return;
+      }
 
+      throw dbErr;
+    }
+
+    if (rows.length === 0) return;
+
+    const success = [];
+    const redisBatch = [];
+
+    // ─────────────────────────────
+    // PROCESS ROWS
+    // ─────────────────────────────
     for (const row of rows) {
       try {
         const payload = JSON.parse(row.payload);
 
-        // Support both single-object and batched payloads
-        const items = Array.isArray(payload.batch) ? payload.batch : [payload];
+        const items = Array.isArray(payload.batch)
+          ? payload.batch
+          : [payload];
 
         for (const item of items) {
           const {
             deviceId,
             latitude,
             longitude,
-            speed     = 0,
-            heading   = 0,
+            speed = 0,
+            heading = 0,
             signalTime = null,
           } = item;
 
           if (!deviceId || latitude == null || longitude == null) continue;
 
-          // Insert telemetry row
+          const deviceTime = signalTime
+            ? new Date(signalTime)
+            : new Date();
+
+          // ───────────── TELEMETRY INSERT ─────────────
           await pgPool.query(
             `INSERT INTO telemetry
-               (device_id, latitude, longitude, speed_kph, heading, device_time)
-             VALUES ($1, $2, $3, $4, $5, $6)
+              (device_id, latitude, longitude, speed_kph, heading, device_time)
+             VALUES ($1,$2,$3,$4,$5,$6)
              ON CONFLICT DO NOTHING`,
-            [deviceId, Number(latitude), Number(longitude), Number(speed), Number(heading),
-             signalTime ? new Date(signalTime) : null]
+            [
+              deviceId,
+              Number(latitude),
+              Number(longitude),
+              Number(speed),
+              Number(heading),
+              deviceTime,
+            ]
           );
 
-          // Upsert latest_positions
+          // ───────────── LATEST POSITION UPSERT ─────────────
           await pgPool.query(
             `INSERT INTO latest_positions
-               (device_id, latitude, longitude, speed_kph, heading, device_time, received_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+              (device_id, latitude, longitude, speed_kph, heading, device_time, received_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
              ON CONFLICT (device_id) DO UPDATE SET
-               latitude    = EXCLUDED.latitude,
-               longitude   = EXCLUDED.longitude,
-               speed_kph   = EXCLUDED.speed_kph,
-               heading     = EXCLUDED.heading,
+               latitude = EXCLUDED.latitude,
+               longitude = EXCLUDED.longitude,
+               speed_kph = EXCLUDED.speed_kph,
+               heading = EXCLUDED.heading,
                device_time = EXCLUDED.device_time,
                received_at = NOW(),
-               updated_at  = NOW()
-             WHERE EXCLUDED.device_time >= latest_positions.device_time
-                OR latest_positions.device_time IS NULL`,
-            [deviceId, Number(latitude), Number(longitude), Number(speed), Number(heading),
-             signalTime ? new Date(signalTime) : null]
+               updated_at = NOW()
+             WHERE latest_positions.device_time IS NULL
+                OR EXCLUDED.device_time >= latest_positions.device_time`,
+            [
+              deviceId,
+              Number(latitude),
+              Number(longitude),
+              Number(speed),
+              Number(heading),
+              deviceTime,
+            ]
           );
 
           redisBatch.push({
             deviceId,
             lat: Number(latitude),
-            lon: Number(longitude),
+            lng: Number(longitude),
             speed: Number(speed),
             heading: Number(heading),
-            dt: signalTime ? new Date(signalTime) : new Date(),
+            dt: deviceTime,
           });
         }
 
         success.push(row.id);
-      } catch (e) {
-        const retry  = (row.retry_count || 0) + 1;
+      } catch (err) {
+        const retry = (row.retry_count || 0) + 1;
         const status = retry >= MAX_RETRY ? "FAILED" : "PENDING";
-        console.error(`[Worker] Row ${row.id} failed (attempt ${retry}):`, e.message);
+
+        console.error(
+          `[Worker] row ${row.id} failed:`,
+          err.message
+        );
+
         await pgPool.query(
           `UPDATE telemetry_ingestion_buffer
-           SET retry_count = $2, status = $3
-           WHERE id = $1`,
+           SET retry_count=$2, status=$3
+           WHERE id=$1`,
           [row.id, retry, status]
         );
       }
     }
 
-    // Mark processed rows
+    // ─────────────────────────────
+    // MARK PROCESSED
+    // ─────────────────────────────
     if (success.length) {
       await pgPool.query(
         `UPDATE telemetry_ingestion_buffer
-         SET status = 'PROCESSED', processed_at = NOW()
+         SET status='PROCESSED', processed_at=NOW()
          WHERE id = ANY($1)`,
         [success]
       );
-      console.log(`[Worker] Processed ${success.length} buffer rows`);
+
+      console.log(`[Worker] processed ${success.length} rows`);
     }
 
-    // Push latest positions to Redis
+    // ─────────────────────────────
+    // REDIS PUSH
+    // ─────────────────────────────
     if (redisBatch.length) {
       await setLatestPositionsBatch(redisBatch);
     }
-  } catch (e) {
-    console.error("[Worker] processBatch error:", e.message);
+
+  } catch (err) {
+    console.error("[Worker] fatal error:", err.message);
   } finally {
     isRunning = false;
   }
