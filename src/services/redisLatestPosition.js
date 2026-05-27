@@ -16,13 +16,13 @@ export async function setLatestPositionsBatch(positions = []) {
 
       const key = `vehicle:${p.deviceId}:latest`;
 
-      pipeline.hset(key, {
-        lat: p.lat ?? 0,
-        lng: p.lon ?? 0,
-        speed: p.speed ?? 0,
-        heading: p.heading ?? 0,
-        timestamp: p.dt ? p.dt.getTime() : Date.now(),
-      });
+   pipeline.hset(key, {
+  lat: p.lat ?? 0,
+  lng: p.lng ?? p.lon ?? 0,
+  speed: p.speed ?? 0,
+  heading: p.heading ?? 0,
+  timestamp: p.dt ? p.dt.getTime() : Date.now(),
+});
 
       pipeline.expire(key, TTL_SECONDS);
     }
