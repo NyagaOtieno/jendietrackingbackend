@@ -27,20 +27,19 @@ async function processBatch() {
   isRunning = true;
 
   try {
-    let rows = [];
+    const { rows } = await pgPool.query(`
+      SELECT id, payload, retry_count
+      FROM telemetry_ingestion_buffer
+      WHERE status = 'PENDING'
+      ORDER BY created_at ASC
+      LIMIT 1000
+    `);
 
-    // ─────────────────────────────
-    // OPTIONAL BUFFER READ (NON-CRITICAL)
-    // ─────────────────────────────
-    try {
-      const result = await pgPool.query(`
-        SELECT id, payload, retry_count
-        FROM telemetry_ingestion_buffer
-        WHERE status = 'PENDING'
-        ORDER BY created_at ASC
-        LIMIT 1000
-      `);
+    console.log(`[Worker] fetched ${rows.length} rows`);
 
+    if (!rows.length) {
+      return; // OK but now visible
+    }
       rows = result.rows || [];
     } catch (err) {
       if (!err.message.includes("does not exist")) {
