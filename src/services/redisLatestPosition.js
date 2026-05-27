@@ -12,20 +12,28 @@ export async function setLatestPositionsBatch(positions = []) {
     const pipeline = redis.pipeline();
 
     for (const p of positions) {
-      if (!p?.deviceId) continue;
+  if (!p?.deviceId) continue;
 
-      const key = `vehicle:${p.deviceId}:latest`;
+  const key = `vehicle:${p.deviceId}:latest`;
 
-   pipeline.hset(key, {
-  lat: p.lat ?? 0,
-  lng: p.lng ?? p.lon ?? 0,
-  speed: p.speed ?? 0,
-  heading: p.heading ?? 0,
-  timestamp: p.dt ? p.dt.getTime() : Date.now(),
-});
+  const lat = Number(p.lat ?? 0);
+  const lng = Number(p.lng ?? p.lon ?? 0);
 
-      pipeline.expire(key, TTL_SECONDS);
-    }
+  const ts =
+    p.dt instanceof Date && !isNaN(p.dt)
+      ? p.dt.getTime()
+      : Date.now();
+
+  pipeline.hset(key, {
+    lat,
+    lng,
+    speed: Number(p.speed ?? 0),
+    heading: Number(p.heading ?? 0),
+    timestamp: ts,
+  });
+
+  pipeline.expire(key, TTL_SECONDS);
+}
 
     await pipeline.exec();
 
