@@ -30,7 +30,7 @@ async function processBatch() {
     let rows = [];
 
     // ─────────────────────────────
-    // SAFE DB READ (NO CRASH MODE)
+    // OPTIONAL BUFFER READ (NON-CRITICAL)
     // ─────────────────────────────
     try {
       const result = await pgPool.query(`
@@ -42,25 +42,19 @@ async function processBatch() {
       `);
 
       rows = result.rows || [];
-    } catch (dbErr) {
-      if (dbErr.message.includes("does not exist")) {
-        console.warn(
-          "[Worker] telemetry_ingestion_buffer missing → running in IDLE MODE"
-        );
-        return;
+    } catch (err) {
+      if (!err.message.includes("does not exist")) {
+        console.error("[Worker] DB error:", err.message);
       }
-
-      throw dbErr;
+      rows = [];
     }
 
+    // If no buffer data → exit cleanly
     if (rows.length === 0) return;
 
     const success = [];
     const redisBatch = [];
 
-    // ─────────────────────────────
-    // PROCESS ROWS
-    // ─────────────────────────────
     for (const row of rows) {
       try {
         const payload = JSON.parse(row.payload);
@@ -85,7 +79,9 @@ async function processBatch() {
             ? new Date(signalTime)
             : new Date();
 
-          // ───────────── TELEMETRY INSERT ─────────────
+          // ─────────────────────────────
+          // ALWAYS SAVE TELEMETRY
+          // ─────────────────────────────
           await pgPool.query(
             `INSERT INTO telemetry
               (device_id, latitude, longitude, speed_kph, heading, device_time)
@@ -101,7 +97,9 @@ async function processBatch() {
             ]
           );
 
-          // ───────────── LATEST POSITION UPSERT ─────────────
+          // ─────────────────────────────
+          // ALWAYS UPDATE LATEST POSITION (MAIN GOAL)
+          // ─────────────────────────────
           await pgPool.query(
             `INSERT INTO latest_positions
               (device_id, latitude, longitude, speed_kph, heading, device_time, received_at, updated_at)
@@ -113,9 +111,7 @@ async function processBatch() {
                heading = EXCLUDED.heading,
                device_time = EXCLUDED.device_time,
                received_at = NOW(),
-               updated_at = NOW()
-             WHERE latest_positions.device_time IS NULL
-                OR EXCLUDED.device_time >= latest_positions.device_time`,
+               updated_at = NOW()`,
             [
               deviceId,
               Number(latitude),
@@ -126,6 +122,9 @@ async function processBatch() {
             ]
           );
 
+          // ─────────────────────────────
+          // REDIS UPDATE
+          // ─────────────────────────────
           redisBatch.push({
             deviceId,
             lat: Number(latitude),
@@ -138,25 +137,12 @@ async function processBatch() {
 
         success.push(row.id);
       } catch (err) {
-        const retry = (row.retry_count || 0) + 1;
-        const status = retry >= MAX_RETRY ? "FAILED" : "PENDING";
-
-        console.error(
-          `[Worker] row ${row.id} failed:`,
-          err.message
-        );
-
-        await pgPool.query(
-          `UPDATE telemetry_ingestion_buffer
-           SET retry_count=$2, status=$3
-           WHERE id=$1`,
-          [row.id, retry, status]
-        );
+        console.error("[Worker] row error:", err.message);
       }
     }
 
     // ─────────────────────────────
-    // MARK PROCESSED
+    // MARK PROCESSED (if buffer exists)
     // ─────────────────────────────
     if (success.length) {
       await pgPool.query(
@@ -165,24 +151,21 @@ async function processBatch() {
          WHERE id = ANY($1)`,
         [success]
       );
-
-      console.log(`[Worker] processed ${success.length} rows`);
     }
 
     // ─────────────────────────────
-    // REDIS PUSH
+    // PUSH TO REDIS
     // ─────────────────────────────
     if (redisBatch.length) {
       await setLatestPositionsBatch(redisBatch);
     }
 
   } catch (err) {
-    console.error("[Worker] fatal error:", err.message);
+    console.error("[Worker] fatal:", err.message);
   } finally {
     isRunning = false;
   }
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // START / STOP
 // ─────────────────────────────────────────────────────────────────────────────
