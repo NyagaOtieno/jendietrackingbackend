@@ -74,6 +74,15 @@ app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
   next();
 });
+app.use((req, res, next) => {
+  const blocked = ["PROPFIND", "TRACE", "PUT", "DELETE"];
+
+  if (blocked.includes(req.method)) {
+    return res.status(403).send("Forbidden");
+  }
+
+  next();
+});
 
 app.get("/health", async (_req, res) => {
   try {
