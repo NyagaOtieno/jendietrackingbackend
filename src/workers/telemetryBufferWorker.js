@@ -26,8 +26,10 @@ async function processBatch() {
   if (isRunning) return;
   isRunning = true;
 
+  let rows = [];
+
   try {
-    const { rows } = await pgPool.query(`
+    const result = await pgPool.query(`
       SELECT id, payload, retry_count
       FROM telemetry_ingestion_buffer
       WHERE status = 'PENDING'
@@ -35,135 +37,105 @@ async function processBatch() {
       LIMIT 1000
     `);
 
+    rows = result.rows || [];
     console.log(`[Worker] fetched ${rows.length} rows`);
 
-    if (!rows.length) {
-      return; // OK but now visible
-    }
-      rows = result.rows || [];
-    } catch (err) {
-      if (!err.message.includes("does not exist")) {
-        console.error("[Worker] DB error:", err.message);
-      }
-      rows = [];
-    }
-
-    // If no buffer data → exit cleanly
-    if (rows.length === 0) return;
-
-    const success = [];
-    const redisBatch = [];
-
-    for (const row of rows) {
-      try {
-        const payload = JSON.parse(row.payload);
-
-        const items = Array.isArray(payload.batch)
-          ? payload.batch
-          : [payload];
-
-        for (const item of items) {
-          const {
-            deviceId,
-            latitude,
-            longitude,
-            speed = 0,
-            heading = 0,
-            signalTime = null,
-          } = item;
-
-          if (!deviceId || latitude == null || longitude == null) continue;
-
-          const deviceTime = signalTime
-            ? new Date(signalTime)
-            : new Date();
-
-          // ─────────────────────────────
-          // ALWAYS SAVE TELEMETRY
-          // ─────────────────────────────
-          await pgPool.query(
-            `INSERT INTO telemetry
-              (device_id, latitude, longitude, speed_kph, heading, device_time)
-             VALUES ($1,$2,$3,$4,$5,$6)
-             ON CONFLICT DO NOTHING`,
-            [
-              deviceId,
-              Number(latitude),
-              Number(longitude),
-              Number(speed),
-              Number(heading),
-              deviceTime,
-            ]
-          );
-
-          // ─────────────────────────────
-          // ALWAYS UPDATE LATEST POSITION (MAIN GOAL)
-          // ─────────────────────────────
-          await pgPool.query(
-            `INSERT INTO latest_positions
-              (device_id, latitude, longitude, speed_kph, heading, device_time, received_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
-             ON CONFLICT (device_id) DO UPDATE SET
-               latitude = EXCLUDED.latitude,
-               longitude = EXCLUDED.longitude,
-               speed_kph = EXCLUDED.speed_kph,
-               heading = EXCLUDED.heading,
-               device_time = EXCLUDED.device_time,
-               received_at = NOW(),
-               updated_at = NOW()`,
-            [
-              deviceId,
-              Number(latitude),
-              Number(longitude),
-              Number(speed),
-              Number(heading),
-              deviceTime,
-            ]
-          );
-
-          // ─────────────────────────────
-          // REDIS UPDATE
-          // ─────────────────────────────
-          redisBatch.push({
-            deviceId,
-            lat: Number(latitude),
-            lng: Number(longitude),
-            speed: Number(speed),
-            heading: Number(heading),
-            dt: deviceTime,
-          });
-        }
-
-        success.push(row.id);
-      } catch (err) {
-        console.error("[Worker] row error:", err.message);
-      }
-    }
-
-    // ─────────────────────────────
-    // MARK PROCESSED (if buffer exists)
-    // ─────────────────────────────
-    if (success.length) {
-      await pgPool.query(
-        `UPDATE telemetry_ingestion_buffer
-         SET status='PROCESSED', processed_at=NOW()
-         WHERE id = ANY($1)`,
-        [success]
-      );
-    }
-
-    // ─────────────────────────────
-    // PUSH TO REDIS
-    // ─────────────────────────────
-    if (redisBatch.length) {
-      await setLatestPositionsBatch(redisBatch);
-    }
-
   } catch (err) {
-    console.error("[Worker] fatal:", err.message);
-  } finally {
+    console.error("[Worker] DB read error:", err.message);
+
+    // IMPORTANT: do NOT crash worker
     isRunning = false;
+    return;
   }
+
+  if (rows.length === 0) {
+    isRunning = false;
+    return;
+  }
+
+  const success = [];
+  const redisBatch = [];
+
+  for (const row of rows) {
+    try {
+      const payload = JSON.parse(row.payload);
+
+      const items = Array.isArray(payload.batch)
+        ? payload.batch
+        : [payload];
+
+      for (const item of items) {
+        const {
+          deviceId,
+          latitude,
+          longitude,
+          speed = 0,
+          heading = 0,
+          signalTime = null,
+        } = item;
+
+        if (!deviceId || latitude == null || longitude == null) continue;
+
+        const deviceTime = signalTime ? new Date(signalTime) : new Date();
+
+        // TELEMETRY
+        await pgPool.query(
+          `INSERT INTO telemetry
+           (device_id, latitude, longitude, speed_kph, heading, device_time)
+           VALUES ($1,$2,$3,$4,$5,$6)
+           ON CONFLICT DO NOTHING`,
+          [deviceId, latitude, longitude, speed, heading, deviceTime]
+        );
+
+        // LATEST POSITIONS (CRITICAL)
+        await pgPool.query(
+          `INSERT INTO latest_positions
+           (device_id, latitude, longitude, speed_kph, heading, device_time, received_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
+           ON CONFLICT (device_id) DO UPDATE SET
+             latitude = EXCLUDED.latitude,
+             longitude = EXCLUDED.longitude,
+             speed_kph = EXCLUDED.speed_kph,
+             heading = EXCLUDED.heading,
+             device_time = EXCLUDED.device_time,
+             updated_at = NOW()`,
+          [deviceId, latitude, longitude, speed, heading, deviceTime]
+        );
+
+        // REDIS
+        redisBatch.push({
+          deviceId,
+          lat: latitude,
+          lon: longitude,
+          speed,
+          heading,
+          dt: deviceTime,
+        });
+      }
+
+      success.push(row.id);
+
+    } catch (err) {
+      console.error("[Worker] row error:", err.message);
+    }
+  }
+
+  // MARK PROCESSED
+  if (success.length) {
+    await pgPool.query(
+      `UPDATE telemetry_ingestion_buffer
+       SET status='PROCESSED', processed_at=NOW()
+       WHERE id = ANY($1)`,
+      [success]
+    );
+  }
+
+  // REDIS PUSH
+  if (redisBatch.length) {
+    await setLatestPositionsBatch(redisBatch);
+  }
+
+  isRunning = false;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // START / STOP
