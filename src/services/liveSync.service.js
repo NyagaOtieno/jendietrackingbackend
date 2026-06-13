@@ -63,7 +63,6 @@ export async function runLiveSync() {
         GROUP BY deviceid
       ) latest ON e.deviceid = latest.deviceid
               AND e.id       = latest.max_id
-      LIMIT 5000
     `, [since]);
 
     conn.release();
