@@ -1,6 +1,6 @@
 // src/services/liveSync.service.js
 import { mariaPool } from "./mariaSync.service.js";
-import { pgPool }    from "../config/db.js";          // ← correct source
+import { pgPool }    from "../config/db.js";
 
 const log = (level, msg, meta = {}) =>
   console.log(JSON.stringify({ time: new Date().toISOString(), level, msg, ...meta }));
@@ -36,12 +36,13 @@ export async function runLiveSync() {
   try {
     const cache = await deviceCache();
 
-    // Only devices that reported in the last 2 minutes
+    // Devices that reported in the last 2 minutes
     const since = new Date(Date.now() - 2 * 60_000)
       .toISOString().slice(0, 19).replace("T", " ");
 
     conn = await mariaPool.getConnection();
 
+    // NO LIMIT — fetch ALL active devices
     const rows = await conn.query(`
       SELECT
         d.uniqueid   AS device_uid,
@@ -65,17 +66,12 @@ export async function runLiveSync() {
               AND e.id       = latest.max_id
     `, [since]);
 
-    conn.release();
-    conn = null;
+    conn.release(); conn = null;
 
-    if (!rows.length) {
-      log("info", "liveSync: no active devices");
-      return;
-    }
+    if (!rows.length) return;
 
     // Batch upsert into latest_positions — 200 rows at a time
-    let upserted = 0;
-    let skipped  = 0;
+    let upserted = 0, skipped = 0;
 
     for (let i = 0; i < rows.length; i += 200) {
       const chunk  = rows.slice(i, i + 200);
@@ -86,17 +82,14 @@ export async function runLiveSync() {
       for (const r of chunk) {
         const pgId = cache.get(String(r.device_uid));
         if (!pgId) { skipped++; continue; }
-        const lat = toNum(r.latitude);
-        const lon = toNum(r.longitude);
+        const lat = toNum(r.latitude), lon = toNum(r.longitude);
         if (lat == null || lon == null) { skipped++; continue; }
 
         vals.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},NOW())`);
-        params.push(
-          pgId, lat, lon,
-          toNum(r.speed_kph) ?? 0,
-          toNum(r.heading)   ?? 0,
-          r.device_time ?? r.received_at ?? null
-        );
+        params.push(pgId, lat, lon,
+                    toNum(r.speed_kph) ?? 0,
+                    toNum(r.heading)   ?? 0,
+                    r.device_time ?? r.received_at ?? null);
         upserted++;
       }
 
@@ -113,8 +106,7 @@ export async function runLiveSync() {
           heading     = EXCLUDED.heading,
           device_time = EXCLUDED.device_time,
           received_at = EXCLUDED.received_at
-        WHERE EXCLUDED.device_time IS NOT DISTINCT FROM EXCLUDED.device_time
-           OR EXCLUDED.device_time > latest_positions.device_time
+        WHERE EXCLUDED.device_time > latest_positions.device_time
            OR latest_positions.device_time IS NULL
       `, params);
     }

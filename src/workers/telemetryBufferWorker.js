@@ -1,93 +1,182 @@
-// src/workers/telemetryBufferWorker.js
-import dotenv from "dotenv";
-dotenv.config();
+import "dotenv/config";
 
-import { pgPool } from "../config/db.js";
+import { pgPool }      from "../config/db.js";
+import { initRedis }   from "../config/redis.js";
 import {
-  syncVehicles,
-  runLiveSync,
-  runMariaSync,
-  loadDeviceMap,
   initMariaSync,
-  mariaPool,
+  runMariaSync,
+  runLiveSync,
+  syncVehicles,
 } from "../services/mariaSync.service.js";
 
-// ── Intervals ──────────────────────────────────────────────────────────────
-const LIVE_INTERVAL    = Number(process.env.LIVE_SYNC_INTERVAL    ||   1_000); // 1s  ← live positions
-const FULL_INTERVAL    = Number(process.env.SYNC_INTERVAL          ||  60_000); // 60s ← telemetry history
-const VEHICLE_INTERVAL = Number(process.env.VEHICLE_SYNC_INTERVAL || 1_800_000); // 30m ← plates/names
+const MAX_RETRY       = 5;
+const BUFFER_INTERVAL = 5_000;
+const SYNC_INTERVAL   = 60_000;
+const VEHICLE_INTERVAL = 1_800_000;
 
-let liveBusy    = false;
-let fullBusy    = false;
-let vehicleBusy = false;
+let isRunning = false;
+let batchTimer, liveTimer, syncTimer, vehicleTimer;
 
-// ── Guards ─────────────────────────────────────────────────────────────────
-async function safeLiveSync() {
-  if (liveBusy) return;
-  liveBusy = true;
-  try   { await runLiveSync(); }
-  catch (e) { console.error("[Worker] liveSync error:", e.message); }
-  finally   { liveBusy = false; }
+// ── Buffer processor — writes ingestion buffer directly to DB ────
+async function processBatch() {
+  if (isRunning) return;
+  isRunning = true;
+
+  try {
+    const { rows } = await pgPool.query(`
+      SELECT id, payload, retry_count
+      FROM telemetry_ingestion_buffer
+      WHERE status = 'PENDING'
+      ORDER BY created_at ASC
+      LIMIT 1000
+    `);
+
+    if (!rows.length) return;
+
+    const success = [];
+
+    for (const row of rows) {
+      try {
+        const payload = JSON.parse(row.payload);
+        const items   = Array.isArray(payload.batch) ? payload.batch : [payload];
+
+        for (const item of items) {
+          const { deviceId, latitude, longitude,
+                  speed = 0, heading = 0, signalTime = null } = item;
+          if (!deviceId || latitude == null || longitude == null) continue;
+
+          const dt = signalTime ? new Date(signalTime) : null;
+
+          await pgPool.query(`
+            INSERT INTO telemetry
+              (device_id, latitude, longitude, speed_kph, heading, device_time, received_at)
+            VALUES ($1,$2,$3,$4,$5,$6,NOW())
+            ON CONFLICT DO NOTHING
+          `, [deviceId, +latitude, +longitude, +speed, +heading, dt]);
+
+          await pgPool.query(`
+            INSERT INTO latest_positions
+              (device_id, latitude, longitude, speed_kph, heading, device_time, received_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
+            ON CONFLICT (device_id) DO UPDATE SET
+              latitude    = EXCLUDED.latitude,
+              longitude   = EXCLUDED.longitude,
+              speed_kph   = EXCLUDED.speed_kph,
+              heading     = EXCLUDED.heading,
+              device_time = EXCLUDED.device_time,
+              received_at = NOW(),
+              updated_at  = NOW()
+            WHERE EXCLUDED.device_time > latest_positions.device_time
+               OR latest_positions.device_time IS NULL
+          `, [deviceId, +latitude, +longitude, +speed, +heading, dt]);
+        }
+
+        success.push(row.id);
+      } catch (e) {
+        const retry  = (row.retry_count || 0) + 1;
+        const status = retry >= MAX_RETRY ? "FAILED" : "PENDING";
+        console.error(`[Buffer] Row ${row.id} failed (attempt ${retry}):`, e.message);
+        await pgPool.query(
+          `UPDATE telemetry_ingestion_buffer SET retry_count=$2, status=$3 WHERE id=$1`,
+          [row.id, retry, status]
+        ).catch(() => {});
+      }
+    }
+
+    if (success.length) {
+      await pgPool.query(
+        `UPDATE telemetry_ingestion_buffer
+         SET status='PROCESSED', processed_at=NOW()
+         WHERE id=ANY($1)`,
+        [success]
+      );
+      console.log(`[Buffer] ✅ Processed ${success.length} rows`);
+    }
+  } catch (e) {
+    console.error("[Buffer] processBatch error:", e.message);
+  } finally {
+    isRunning = false;
+  }
 }
 
-async function safeFullSync() {
-  if (fullBusy) return;
-  fullBusy = true;
-  try   { await runMariaSync(); }
-  catch (e) { console.error("[Worker] fullSync error:", e.message); }
-  finally   { fullBusy = false; }
+// ── Start ────────────────────────────────────────────────────────
+function startWorker() {
+  if (batchTimer) return;
+  console.log("[Worker] ⚡ liveSync every 1000ms");
+
+  // 1s live sync — most important, keeps latest_positions fresh
+  liveTimer    = setInterval(() =>
+    runLiveSync().catch(e => console.error("[Worker] liveSync error:", e.message)),
+    1000
+  );
+
+  // 5s buffer drain
+  batchTimer   = setInterval(processBatch, BUFFER_INTERVAL);
+
+  // 60s full history sync
+  syncTimer    = setInterval(() =>
+    runMariaSync().catch(e => console.error("[Worker] mariaSync error:", e.message)),
+    SYNC_INTERVAL
+  );
+
+  // 30m vehicle sync
+  vehicleTimer = setInterval(() =>
+    syncVehicles().catch(e => console.error("[Worker] vehicleSync error:", e.message)),
+    VEHICLE_INTERVAL
+  );
+
+  // Kick off immediately
+  runLiveSync().catch(() => {});
+  processBatch();
 }
 
-async function safeVehicleSync() {
-  if (vehicleBusy) return;
-  vehicleBusy = true;
-  try   { await syncVehicles(); await loadDeviceMap(); }
-  catch (e) { console.error("[Worker] vehicleSync error:", e.message); }
-  finally   { vehicleBusy = false; }
+// ── Stop ─────────────────────────────────────────────────────────
+export function stopTelemetryBufferWorker() {
+  [liveTimer, batchTimer, syncTimer, vehicleTimer].forEach(clearInterval);
+  liveTimer = batchTimer = syncTimer = vehicleTimer = null;
+  console.log("🛑 Worker stopped");
 }
 
-// ── Crash safety ───────────────────────────────────────────────────────────
-process.on("uncaughtException",  e => console.error("[Worker] Uncaught:", e.message));
-process.on("unhandledRejection", e => console.error("[Worker] Unhandled:", String(e)));
+// ── Bootstrap ────────────────────────────────────────────────────
+async function main() {
+  // Redis — optional
+  try {
+    await initRedis();
+    console.log("✅ Redis connected");
+  } catch (e) {
+    console.warn("⚠️  Redis unavailable:", e.message);
+  }
 
-// ── Startup ────────────────────────────────────────────────────────────────
-async function start() {
-  // Health checks
-  const pg = await pgPool.connect(); pg.release();
-  console.log("✅ PostgreSQL connected");
-  const mc = await mariaPool.getConnection(); mc.release();
-  console.log("✅ MariaDB connected");
+  // PostgreSQL — wait up to 30s
+  for (let i = 1; i <= 10; i++) {
+    try {
+      await pgPool.query("SELECT 1");
+      console.log("✅ PostgreSQL connected");
+      break;
+    } catch (e) {
+      console.warn(`⏳ PG not ready (${i}/10): ${e.message}`);
+      if (i === 10) {
+        console.warn("⚠️  PG still unavailable — starting anyway, will retry");
+      } else {
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+  }
 
-  // Init: restore checkpoint from PG + load device map
-  // This runs BEFORE any sync so liveSync starts with correct lastEventId
-  // meaning NO 10-15 min backlog on restart
-  await initMariaSync();
+  // MariaSync init — loads checkpoint + device cache
+  try {
+    await initMariaSync();
+  } catch (e) {
+    console.warn("⚠️  MariaSync init failed (will retry via intervals):", e.message);
+  }
 
-  // ── 1. LIVE SYNC — every 1 second, starts immediately ─────────────────
-  // Uses persistent MariaDB connection + PK range query = <10ms per tick
-  // Writes directly to latest_positions with updated_at = NOW()
-  console.log(`[Worker] ⚡ liveSync every ${LIVE_INTERVAL}ms`);
-  await safeLiveSync();
-  setInterval(safeLiveSync, LIVE_INTERVAL);
+  startWorker();
 
-  // ── 2. VEHICLE SYNC — every 30 min, starts after 15s ─────────────────
-  // Batched bulk upserts (50 queries, not 5000) so PG never crashes
-  setTimeout(() => {
-    console.log(`[Worker] 🚗 vehicleSync every ${VEHICLE_INTERVAL / 60000}min`);
-    safeVehicleSync();
-    setInterval(safeVehicleSync, VEHICLE_INTERVAL);
-  }, 15_000);
-
-  // ── 3. FULL SYNC — every 60s, starts after 30s ────────────────────────
-  // Writes telemetry history table, liveSync handles freshness
-  setTimeout(() => {
-    console.log(`[Worker] 📦 fullSync every ${FULL_INTERVAL / 1000}s`);
-    safeFullSync();
-    setInterval(safeFullSync, FULL_INTERVAL);
-  }, 30_000);
+  process.on("SIGINT",  () => { stopTelemetryBufferWorker(); process.exit(0); });
+  process.on("SIGTERM", () => { stopTelemetryBufferWorker(); process.exit(0); });
+  process.on("unhandledRejection", r =>
+    console.error("[Worker] Unhandled rejection:", r?.message || r)
+  );
 }
 
-start().catch(e => {
-  console.error("[Worker] Fatal startup error:", e.message);
-  process.exit(1);
-});
+main();
